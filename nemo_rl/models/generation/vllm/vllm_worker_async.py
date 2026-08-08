@@ -438,10 +438,11 @@ class VllmAsyncGenerationWorkerImpl(
                 """Clamp the request's max output tokens so that input + output <= max_model_len."""
                 remaining = self.model_config.max_model_len - len(prompt_token_ids)
                 if remaining <= 0:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Prompt length ({len(prompt_token_ids)}) fills or exceeds "
                         f"max_model_len ({self.model_config.max_model_len}). "
-                        f"No room for output tokens."
+                        f"The model's maximum context length leaves no room for "
+                        f"output tokens."
                     )
                 max_tokens = min(request_max_tokens, remaining)
                 self._set_max_tokens(request, max_tokens)

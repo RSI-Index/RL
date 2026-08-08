@@ -395,6 +395,40 @@ def test_vllm_async_http_server_loads_reasoning_parser_plugin(monkeypatch):
     assert "reasoning_parser_plugin" not in openai_serving_chat.instances[0].kwargs
 
 
+def test_vllm_async_http_server_reports_exhausted_prompt_as_validation_error(
+    monkeypatch,
+):
+    (
+        _,
+        _,
+        openai_serving_chat,
+    ) = _install_fake_vllm_openai_modules(monkeypatch)
+
+    worker = VllmAsyncGenerationWorkerImpl.__new__(VllmAsyncGenerationWorkerImpl)
+    worker.cfg = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "vllm_cfg": {},
+    }
+    worker.llm = MagicMock(model_config="model-config", renderer="renderer")
+    model_config = MagicMock(served_model_name="served-model", model="model-path")
+    worker.llm_async_engine_args = MagicMock()
+    worker.llm_async_engine_args.create_model_config.return_value = model_config
+
+    worker._setup_vllm_openai_api_server(_FakeFastAPIApp())
+
+    online_renderer = openai_serving_chat.instances[0].kwargs["online_renderer"]
+    online_renderer.model_config = types.SimpleNamespace(max_model_len=4)
+    request = types.SimpleNamespace(max_completion_tokens=8, max_tokens=None)
+    validation_error = sys.modules["vllm.exceptions"].VLLMValidationError
+
+    with pytest.raises(
+        validation_error,
+        match=r"Prompt length \(4\) fills or exceeds max_model_len \(4\)",
+    ):
+        online_renderer._clamp_max_tokens(request, 8, [1, 2, 3, 4])
+
+
 def test_nano_v3_reasoning_parser_swaps_reasoning_when_thinking_disabled(
     monkeypatch,
 ):
