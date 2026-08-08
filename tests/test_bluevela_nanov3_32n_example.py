@@ -42,6 +42,7 @@ def test_dry_run_renders_32_node_contract_without_writing(tmp_path: Path) -> Non
     assert "span[ptile=17]" in rendered
     assert "num=8:mode=shared:j_exclusive=yes" in rendered
     assert "32 hosts x 8 GPUs" in rendered
+    assert "Preparation reuse: automatic after exact-commit artifact validation" in rendered
     assert "done(PREP_JOB_ID)" in rendered
     assert CONFIG in rendered
     assert ENTRYPOINT in rendered
@@ -77,6 +78,30 @@ def test_dry_run_renders_two_node_batch_contract_without_training_overrides(
     assert not run_dir.exists()
 
 
+def test_dry_run_renders_validated_host_exclusions(tmp_path: Path) -> None:
+    run_dir = tmp_path / "must-not-exist"
+    env = {
+        **os.environ,
+        "RUN_ID": "20260808T182300Z-nanov3-rdma-retry-yuetai",
+        "RUN_DIR": str(run_dir),
+        "SOURCE_COMMIT": "e496258b00000000000000000000000000000000",
+        "TRAIN_EXCLUDE_HOSTS": "p6-r21-n2 p3-r30-n1",
+    }
+
+    result = subprocess.run(
+        ["bash", str(SUBMIT), "--dry-run"],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    rendered = result.stdout
+    assert "Training excluded hosts: p6-r21-n2 p3-r30-n1" in rendered
+    assert "select[hname!='p6-r21-n2' && hname!='p3-r30-n1']" in rendered
+    assert not run_dir.exists()
+
+
 def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     submit = (EXAMPLE_DIR / "submit.sh").read_text()
     prepare = (EXAMPLE_DIR / "prepare.sh").read_text()
@@ -107,6 +132,14 @@ def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     assert '"$TARGET_CONFIG"' in prepare
     assert "vllm-0.25.1-cp38-abi3-manylinux_2_28_x86_64.whl" in prepare
     assert "PREP_SUCCESS" in prepare
+    assert "find_reusable_prep_run" in submit
+    assert "validate_reusable_prep_run" in submit
+    assert '[[ $marker_source_commit == "$source_commit" ]]' in submit
+    assert "stage_reused_preparation" in submit
+    assert "prep_job_id=reused" in submit
+    assert "train_exclude_hosts=${TRAIN_EXCLUDE_HOSTS:-}" in submit
+    assert "train_select_terms+=(\"hname!='${excluded_host}'\")" in submit
+    assert 'train_resource="select[${train_select}] ${train_resource}"' in submit
 
     assert "ray start --head" in ray_node
     assert "ray start --address" in ray_node

@@ -23,6 +23,7 @@ readonly target_config="examples/nemo_gym/grpo_nanov3.yaml"
 readonly model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
 readonly tokenizer_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 readonly default_storage_root="/proj/datasets/interns/yuetai/agent_envs/more_task"
+readonly vllm_actor="nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
 
 usage() {
     cat <<'EOF'
@@ -30,8 +31,9 @@ Usage: submit.sh [--dry-run|--submit]
 
   --dry-run  Print the resolved preparation and training submissions.
              This is the default and does not create the run directory.
-  --submit   Create a unique run directory, submit preparation, then submit a
-             dependent Nano v3 GRPO training job.
+  --submit   Create a unique run directory and reuse a validated preparation
+             from the same source commit when available. Otherwise, submit
+             preparation followed by a dependent Nano v3 GRPO training job.
 EOF
 }
 
@@ -84,6 +86,136 @@ parse_job_id() {
     sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' <<<"$1" | head -n 1
 }
 
+read_marker_value() {
+    local marker=$1
+    local key=$2
+    local count
+    count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$marker")
+    [[ $count == 1 ]] || return 1
+    awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print }' "$marker"
+}
+
+validate_reusable_prep_run() {
+    local candidate=$1
+    local marker="$candidate/status/PREP_SUCCESS"
+    local marker_source_commit marker_container marker_container_sha
+    local actual_container_sha model_snapshot tokenizer_snapshot
+    local train_data validation_data gym_venv_dir vllm_worker_venv
+    local submodule_status
+    local expected_train_data="$cache_root/huggingface/nanov3_data/prepared/train-split.jsonl"
+    local expected_validation_data="$cache_root/huggingface/nanov3_data/prepared/val-split.jsonl"
+    local expected_gym_venv_dir="$cache_root/huggingface/gym_venvs"
+    local expected_vllm_venv="$cache_root/ray_venvs/$source_commit/$vllm_actor"
+    local model_snapshot_root="$cache_root/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/snapshots"
+    local tokenizer_snapshot_root="$cache_root/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/snapshots"
+
+    [[ $candidate != "$run_dir" && -s $marker && -d $candidate/source/.git ]] \
+        || return 1
+    read_marker_value "$marker" prepared_at_utc >/dev/null || return 1
+    marker_source_commit=$(read_marker_value "$marker" source_commit) || return 1
+    marker_container=$(read_marker_value "$marker" container_image) || return 1
+    marker_container_sha=$(read_marker_value "$marker" container_sha256) || return 1
+    model_snapshot=$(read_marker_value "$marker" model_snapshot) || return 1
+    train_data=$(read_marker_value "$marker" train_data) || return 1
+    validation_data=$(read_marker_value "$marker" validation_data) || return 1
+    gym_venv_dir=$(read_marker_value "$marker" gym_venv_dir) || return 1
+    vllm_worker_venv=$(read_marker_value "$marker" vllm_worker_venv) || return 1
+
+    [[ $marker_source_commit == "$source_commit" ]] || return 1
+    [[ $marker_container == "$container_image" && -s $container_image ]] || return 1
+    [[ -s $candidate/status/container.sha256 ]] || return 1
+    actual_container_sha=$(sha256sum "$container_image" | awk '{ print $1 }')
+    [[ $marker_container_sha == "$actual_container_sha" ]] || return 1
+    [[ $(git -C "$candidate/source" rev-parse HEAD 2>/dev/null) == "$source_commit" ]] \
+        || return 1
+    git -C "$candidate/source" diff --quiet || return 1
+    git -C "$candidate/source" diff --cached --quiet || return 1
+    submodule_status=$(git -C "$candidate/source" submodule status --recursive 2>/dev/null) \
+        || return 1
+    if grep -Eq '^[+-U]' <<<"$submodule_status"; then
+        return 1
+    fi
+    [[ -f "$candidate/source/$target_entrypoint" ]] || return 1
+    [[ -f "$candidate/source/$target_config" ]] || return 1
+
+    [[ $model_snapshot == "$model_snapshot_root"/* && -s $model_snapshot/config.json ]] \
+        || return 1
+    [[ $(read_marker_value "$candidate/status/model.ready" model 2>/dev/null) == "$model_id" ]] \
+        || return 1
+    [[ $(read_marker_value "$candidate/status/model.ready" snapshot 2>/dev/null) == "$model_snapshot" ]] \
+        || return 1
+    tokenizer_snapshot=$(read_marker_value "$candidate/status/tokenizer.ready" snapshot 2>/dev/null) \
+        || return 1
+    [[ $(read_marker_value "$candidate/status/tokenizer.ready" tokenizer 2>/dev/null) == "$tokenizer_id" ]] \
+        || return 1
+    [[ $tokenizer_snapshot == "$tokenizer_snapshot_root"/* ]] || return 1
+    [[ -s $tokenizer_snapshot/tokenizer_config.json ]] || return 1
+
+    [[ $train_data == "$expected_train_data" && -s $train_data ]] || return 1
+    [[ $validation_data == "$expected_validation_data" && -s $validation_data ]] \
+        || return 1
+    [[ -s "$cache_root/huggingface/nanov3_data/prepared/DATA_SUCCESS" ]] || return 1
+    [[ $gym_venv_dir == "$expected_gym_venv_dir" && -s $gym_venv_dir/GYM_SUCCESS ]] \
+        || return 1
+    [[ $vllm_worker_venv == "$expected_vllm_venv" ]] || return 1
+    [[ -s $vllm_worker_venv/VENV_SUCCESS && -L $vllm_worker_venv/bin/python ]] \
+        || return 1
+}
+
+find_reusable_prep_run() {
+    local runs_dir="$run_root/nemo-rl-nanov3-32n"
+    local marker candidate
+    [[ -d $runs_dir ]] || return 1
+    while IFS= read -r marker; do
+        candidate=${marker%/status/PREP_SUCCESS}
+        if validate_reusable_prep_run "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done < <(
+        find "$runs_dir" -mindepth 3 -maxdepth 3 -type f \
+            -path '*/status/PREP_SUCCESS' -printf '%T@ %p\n' \
+            | sort -rn | cut -d ' ' -f 2-
+    )
+    return 1
+}
+
+stage_reused_preparation() {
+    local candidate=$1
+    local marker="$candidate/status/PREP_SUCCESS"
+    local model_snapshot tokenizer_snapshot train_data validation_data
+    local gym_venv_dir vllm_worker_venv container_sha prepared_at_utc
+    prepared_at_utc=$(read_marker_value "$marker" prepared_at_utc)
+    container_sha=$(read_marker_value "$marker" container_sha256)
+    model_snapshot=$(read_marker_value "$marker" model_snapshot)
+    tokenizer_snapshot=$(read_marker_value "$candidate/status/tokenizer.ready" snapshot)
+    train_data=$(read_marker_value "$marker" train_data)
+    validation_data=$(read_marker_value "$marker" validation_data)
+    gym_venv_dir=$(read_marker_value "$marker" gym_venv_dir)
+    vllm_worker_venv=$(read_marker_value "$marker" vllm_worker_venv)
+
+    cp -a --reflink=auto "$candidate/source" "$run_dir/source"
+    cp "$candidate/status/container.sha256" "$run_dir/status/container.sha256"
+    cp "$candidate/status/model.ready" "$run_dir/status/model.ready"
+    cp "$candidate/status/tokenizer.ready" "$run_dir/status/tokenizer.ready"
+    {
+        printf 'prepared_at_utc=%s\n' "$prepared_at_utc"
+        printf 'reused_at_utc=%s\n' "$(date -u +%FT%TZ)"
+        printf 'reused_from_run=%s\n' "$candidate"
+        printf 'job_id=reused\n'
+        printf 'source_commit=%s\n' "$source_commit"
+        printf 'container_image=%s\n' "$container_image"
+        printf 'container_sha256=%s\n' "$container_sha"
+        printf 'model_snapshot=%s\n' "$model_snapshot"
+        printf 'tokenizer_snapshot=%s\n' "$tokenizer_snapshot"
+        printf 'train_data=%s\n' "$train_data"
+        printf 'validation_data=%s\n' "$validation_data"
+        printf 'gym_venv_dir=%s\n' "$gym_venv_dir"
+        printf 'vllm_worker_venv=%s\n' "$vllm_worker_venv"
+    } >"$run_dir/status/PREP_SUCCESS.tmp"
+    mv "$run_dir/status/PREP_SUCCESS.tmp" "$run_dir/status/PREP_SUCCESS"
+}
+
 mode=${1:---dry-run}
 [[ $# -le 1 ]] || {
     usage >&2
@@ -125,6 +257,7 @@ train_slots=${TRAIN_SLOTS:-$((train_hosts * train_slots_per_host))}
 train_memory_mb=${TRAIN_MEMORY_MB:-524288}
 train_walltime=${TRAIN_WALLTIME:-04:00}
 gpu_requirement=${GPU_REQUIREMENT:-num=8:mode=shared:j_exclusive=yes}
+train_exclude_hosts=${TRAIN_EXCLUDE_HOSTS:-}
 prep_job_name=${PREP_JOB_NAME:-nrl-nanov3-32n-prep-yuetai}
 train_job_name=${TRAIN_JOB_NAME:-nrl-nanov3-32n-train-yuetai}
 
@@ -144,6 +277,24 @@ validate_identifier TRAIN_JOB_NAME "$train_job_name"
 
 prep_resource="span[hosts=1] select[tmp>${prep_tmp_mb}] rusage[mem=${prep_memory_mb}]"
 train_resource="span[ptile=${train_slots_per_host}] rusage[mem=${train_memory_mb}]"
+train_select_terms=()
+if [[ -n $train_exclude_hosts ]]; then
+    read -r -a excluded_hosts <<<"$train_exclude_hosts"
+    (( ${#excluded_hosts[@]} <= 16 )) \
+        || die "TRAIN_EXCLUDE_HOSTS supports at most 16 space-separated hosts"
+    for excluded_host in "${excluded_hosts[@]}"; do
+        [[ $excluded_host =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] \
+            || die "TRAIN_EXCLUDE_HOSTS contains an invalid hostname: ${excluded_host}"
+        train_select_terms+=("hname!='${excluded_host}'")
+    done
+fi
+if (( ${#train_select_terms[@]} > 0 )); then
+    train_select=${train_select_terms[0]}
+    for train_select_term in "${train_select_terms[@]:1}"; do
+        train_select+=" && ${train_select_term}"
+    done
+    train_resource="select[${train_select}] ${train_resource}"
+fi
 prep_payload="${run_dir}/control/prepare.sh"
 train_payload="${run_dir}/control/train.sh"
 
@@ -160,6 +311,8 @@ render() {
     echo "Model: ${model_id}"
     echo "Tokenizer: ${tokenizer_id}"
     echo "Training shape: ${train_hosts} hosts x 8 GPUs = $((train_hosts * 8)) GPUs"
+    echo "Training excluded hosts: ${train_exclude_hosts:-none}"
+    echo "Preparation reuse: automatic after exact-commit artifact validation"
     echo "Preparation resources: -q ${lsf_queue} -G ${lsf_group} -n ${prep_slots} -M ${prep_memory_mb} -W ${prep_walltime} -R ${prep_resource}"
     echo "Training resources: -q ${lsf_queue} -G ${lsf_group} -n ${train_slots} -M ${train_memory_mb} -W ${train_walltime} -R ${train_resource} -gpu ${gpu_requirement}"
     echo "Training dependency: ${dependency}"
@@ -258,23 +411,40 @@ sha256sum \
     printf 'expected_success_marker=%s/status/SUCCESS\n' "$run_dir"
 } >"$run_dir/RUN_INFO.txt"
 
-prep_output=$(bsub \
-    -q "$lsf_queue" -G "$lsf_group" -n "$prep_slots" \
-    -M "$prep_memory_mb" -W "$prep_walltime" -R "$prep_resource" \
-    -J "$prep_job_name" \
-    -o "${run_dir}/logs/prep.%J.out" -e "${run_dir}/logs/prep.%J.err" \
-    /bin/bash "$run_dir/control/prepare.sh" "$run_dir")
-prep_job_id=$(parse_job_id "$prep_output")
-[[ -n $prep_job_id ]] \
-    || die "unable to parse preparation job ID from: ${prep_output}"
+reused_prep_run=$(find_reusable_prep_run || true)
+if [[ -n $reused_prep_run ]]; then
+    stage_reused_preparation "$reused_prep_run"
+    prep_output="Preparation reused from ${reused_prep_run}"
+    prep_job_id=reused
+    dependency=none
+else
+    prep_output=$(bsub \
+        -q "$lsf_queue" -G "$lsf_group" -n "$prep_slots" \
+        -M "$prep_memory_mb" -W "$prep_walltime" -R "$prep_resource" \
+        -J "$prep_job_name" \
+        -o "${run_dir}/logs/prep.%J.out" -e "${run_dir}/logs/prep.%J.err" \
+        /bin/bash "$run_dir/control/prepare.sh" "$run_dir")
+    prep_job_id=$(parse_job_id "$prep_output")
+    [[ -n $prep_job_id ]] \
+        || die "unable to parse preparation job ID from: ${prep_output}"
+    dependency="done(${prep_job_id})"
+fi
 
-dependency="done(${prep_job_id})"
-train_output=$(bsub \
-    -q "$lsf_queue" -G "$lsf_group" -n "$train_slots" \
-    -M "$train_memory_mb" -W "$train_walltime" -R "$train_resource" \
-    -gpu "$gpu_requirement" -w "$dependency" -J "$train_job_name" \
-    -o "${run_dir}/logs/train.%J.out" -e "${run_dir}/logs/train.%J.err" \
-    /bin/bash "$run_dir/control/train.sh" "$run_dir")
+train_submission=(
+    bsub
+    -q "$lsf_queue" -G "$lsf_group" -n "$train_slots"
+    -M "$train_memory_mb" -W "$train_walltime" -R "$train_resource"
+    -gpu "$gpu_requirement"
+)
+if [[ $dependency != none ]]; then
+    train_submission+=(-w "$dependency")
+fi
+train_submission+=(
+    -J "$train_job_name"
+    -o "${run_dir}/logs/train.%J.out" -e "${run_dir}/logs/train.%J.err"
+    /bin/bash "$run_dir/control/train.sh" "$run_dir"
+)
+train_output=$("${train_submission[@]}")
 train_job_id=$(parse_job_id "$train_output")
 [[ -n $train_job_id ]] \
     || die "unable to parse training job ID from: ${train_output}"
@@ -283,11 +453,20 @@ train_job_id=$(parse_job_id "$train_output")
     printf 'prep_job_id=%s\n' "$prep_job_id"
     printf 'train_job_id=%s\n' "$train_job_id"
     printf 'train_dependency=%s\n' "$dependency"
+    if [[ -n $reused_prep_run ]]; then
+        printf 'prep_reused_from_run=%s\n' "$reused_prep_run"
+    fi
 } >>"$run_dir/RUN_INFO.txt"
 
 echo "$prep_output"
 echo "$train_output"
 echo "Run directory: ${run_dir}"
-echo "Preparation job: ${prep_job_id}"
-echo "Training job: ${train_job_id} (dependency: ${dependency})"
-echo "Monitor: bjobs -l ${prep_job_id} ${train_job_id}"
+if [[ -n $reused_prep_run ]]; then
+    echo "Preparation: reused from ${reused_prep_run}"
+    echo "Training job: ${train_job_id} (no preparation dependency)"
+    echo "Monitor: bjobs -l ${train_job_id}"
+else
+    echo "Preparation job: ${prep_job_id}"
+    echo "Training job: ${train_job_id} (dependency: ${dependency})"
+    echo "Monitor: bjobs -l ${prep_job_id} ${train_job_id}"
+fi

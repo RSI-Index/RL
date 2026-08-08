@@ -18,14 +18,30 @@ The launcher defaults to a no-write dry run:
 bash examples/bluevela/grpo_nanov3_30ba3b_32n8g/submit.sh --dry-run
 ```
 
-Review the rendered 32-host request carefully. Submit preparation and its
-dependent training job only when ready:
+Review the rendered 32-host request carefully. Submit the run when ready:
 
 ```bash
 bash examples/bluevela/grpo_nanov3_30ba3b_32n8g/submit.sh --submit
 ```
 
-Preparation downloads and validates the v0.7.0 SIF, a commit-pinned source
+To avoid hosts with a confirmed fabric fault on a retry, pass a validated,
+space-separated exclusion list through `TRAIN_EXCLUDE_HOSTS`. The exclusion is
+applied only to LSF host selection and does not change the training config:
+
+```bash
+TRAIN_EXCLUDE_HOSTS="host-a host-b" \
+  bash examples/bluevela/grpo_nanov3_30ba3b_32n8g/submit.sh --submit
+```
+
+Before submitting a preparation job, the launcher searches previous runs for a
+successful preparation from the exact same source commit. It validates the
+source checkout, container hash, model and tokenizer snapshots, prepared data,
+Gym environments, and commit-scoped vLLM worker environment. When every check
+passes, it reflink-copies the immutable source checkout into the new run and
+submits training directly without an LSF preparation dependency.
+
+When no reusable preparation passes validation, preparation downloads and
+validates the v0.7.0 SIF, a commit-pinned source
 checkout, `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16`, and
 `nvidia/Nemotron-3-Nano-RL-Training-Blend`. It fills dataset placeholders,
 uses the final 1,000 rows for validation, builds a commit-scoped vLLM 0.25.1
