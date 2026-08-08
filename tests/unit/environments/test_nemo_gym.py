@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import time
 from copy import deepcopy
@@ -138,6 +139,46 @@ def test_nemo_gym_stub_module():
     print(
         f"NeMo-Gym test successfully run! NeMo-Gym config_types module: {config_types}"
     )
+
+
+def test_nemo_gym_restarts_deferred_services_before_rollout(monkeypatch):
+    """A Ray-reconstructed actor must spin Gym back up on the retried task."""
+
+    env_class = NemoGym.__ray_metadata__.modified_class
+    env = env_class(
+        NemoGymConfig(
+            model_name="test-model",
+            base_urls=["http://policy.invalid"],
+            initial_global_config_dict={},
+        )
+    )
+    assert not env._is_spun_up
+
+    spinup_calls = 0
+
+    class _EmptyRolloutCollectionHelper:
+        def run_examples(self, *, examples, head_server_config):
+            return []
+
+    def _fake_spinup():
+        nonlocal spinup_calls
+        spinup_calls += 1
+        env.rch = _EmptyRolloutCollectionHelper()
+        env.head_server_config = object()
+        env._is_spun_up = True
+
+    monkeypatch.setattr(env, "_spinup", _fake_spinup)
+
+    async def _consume_retried_rollout():
+        return [
+            item
+            async for item in env.run_rollouts(
+                [{"agent_ref": {"name": "test-agent"}}], None, "test"
+            )
+        ]
+
+    assert asyncio.run(_consume_retried_rollout()) == []
+    assert spinup_calls == 1
 
 
 @pytest.fixture(scope="function")

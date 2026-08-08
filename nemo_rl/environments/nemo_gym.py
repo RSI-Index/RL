@@ -354,6 +354,11 @@ class NemoGym(EnvironmentInterface):
 
     def __init__(self, cfg: NemoGymConfig):
         self.cfg = cfg
+        # Ray reconstructs the actor by rerunning __init__ after a process or
+        # node failure.  Keep the deferred Gym server setup explicit so the
+        # initial launch can still overlap with vLLM model loading, while
+        # allowing a retried rollout to restore it after actor reconstruction.
+        self._is_spun_up = False
         # Reconstruct the processor inside the actor (rather than serializing it
         # per rollout call) for full-trajectory multimodal postprocessing.
         self._processor: Optional[Any] = None
@@ -380,6 +385,9 @@ class NemoGym(EnvironmentInterface):
         scheduled onto reserved nodes) and spun up explicitly once the vLLM
         server URLs are available, overlapping with vLLM model loading.
         """
+        if self._is_spun_up:
+            return
+
         self.node_ip = _get_node_ip_local()
         _gym_port_low = self.cfg.get("port_range_low", DEFAULT_GYM_PORT_RANGE_LOW)
         _gym_port_high = self.cfg.get("port_range_high", DEFAULT_GYM_PORT_RANGE_HIGH)
@@ -467,6 +475,7 @@ Depending on your data shape, you may want to change these values."""
             port=self.head_server_port,
         )
         self.rch = RolloutCollectionHelper()
+        self._is_spun_up = True
 
     async def run_rollouts(
         self,
@@ -477,6 +486,11 @@ Depending on your data shape, you may want to change these values."""
         """Stream postprocessed rollouts as NeMo-Gym tasks complete."""
         if not nemo_gym_examples:
             raise ValueError("NeMo-Gym rollout batch must not be empty")
+
+        # The creator eagerly calls _spinup() on the initial actor.  Ray actor
+        # restart only reruns __init__, however, so a system-retried rollout
+        # must restore the Gym server and collection helper before use.
+        self._spinup()
 
         from nemo_rl.utils.fastokens import maybe_patch_fastokens
 
