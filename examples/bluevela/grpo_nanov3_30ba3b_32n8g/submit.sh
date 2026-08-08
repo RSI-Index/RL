@@ -113,7 +113,7 @@ checkpoint_dir=${CHECKPOINT_DIR:-${run_dir}/checkpoints}
 wandb_key_file=${WANDB_API_KEY_FILE:-${HOME:?}/.config/megatron-bridge/wandb_api_key}
 hf_token_file=${HF_TOKEN_FILE:-${HOME:?}/.cache/huggingface/token}
 
-lsf_queue=${LSF_QUEUE:-normal}
+lsf_queue=${LSF_QUEUE:-priority}
 lsf_group=${LSF_GROUP:-grp_models}
 prep_slots=${PREP_SLOTS:-64}
 prep_memory_mb=${PREP_MEMORY_MB:-524288}
@@ -133,7 +133,7 @@ validate_identifier PREP_JOB_NAME "$prep_job_name"
 validate_identifier TRAIN_JOB_NAME "$train_job_name"
 [[ $source_commit =~ ^[0-9a-fA-F]{40}$ ]] \
     || die "SOURCE_COMMIT must be a full 40-character Git commit: ${source_commit}"
-[[ $lsf_queue == normal ]] || die "LSF_QUEUE must be normal for this example"
+[[ $lsf_queue == priority ]] || die "LSF_QUEUE must be priority for this example"
 [[ $lsf_group == grp_models ]] || die "LSF_GROUP must be grp_models for this example"
 [[ $prep_slots == 64 ]] || die "PREP_SLOTS must remain 64"
 [[ $train_hosts =~ ^[0-9]+$ && $train_hosts -ge 1 ]] || die "TRAIN_HOSTS must be positive"

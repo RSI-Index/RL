@@ -364,7 +364,7 @@ logger:
   wandb:
     project: "grpo-dev"
     name: "grpo-dev-logger"
-    log_nemo_gym_full_result_tables: false
+    log_nemo_gym_full_result_tables: true
   tensorboard: {}
   mlflow:
     experiment_name: "grpo-dev"

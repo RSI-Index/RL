@@ -35,7 +35,7 @@ def test_dry_run_renders_32_node_contract_without_writing(tmp_path: Path) -> Non
     )
 
     rendered = result.stdout
-    assert "-q normal" in rendered
+    assert "-q priority" in rendered
     assert "-G grp_models" in rendered
     assert "-n 64" in rendered
     assert "-n 544" in rendered
