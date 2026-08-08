@@ -102,6 +102,28 @@ def test_dry_run_renders_validated_host_exclusions(tmp_path: Path) -> None:
     assert not run_dir.exists()
 
 
+def test_dry_run_renders_checkpoint_save_period_override(tmp_path: Path) -> None:
+    run_dir = tmp_path / "must-not-exist"
+    env = {
+        **os.environ,
+        "RUN_ID": "20260808T203000Z-nanov3-checkpoint-5-yuetai",
+        "RUN_DIR": str(run_dir),
+        "SOURCE_COMMIT": "e496258b00000000000000000000000000000000",
+        "CHECKPOINT_SAVE_PERIOD": "5",
+    }
+
+    result = subprocess.run(
+        ["bash", str(SUBMIT), "--dry-run"],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert "Checkpoint save period override: 5" in result.stdout
+    assert not run_dir.exists()
+
+
 def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     submit = (EXAMPLE_DIR / "submit.sh").read_text()
     prepare = (EXAMPLE_DIR / "prepare.sh").read_text()
@@ -278,6 +300,7 @@ def test_train_driver_shares_host_pid_namespace_with_ray_head(
                 "export RUN_ID=pid-namespace-test",
                 f"export RUN_DIR={run_dir}",
                 f"export CHECKPOINT_DIR={checkpoint_dir}",
+                "export CHECKPOINT_SAVE_PERIOD=5",
                 f"export CACHE_ROOT={cache_root}",
                 f"export CONTAINER_IMAGE={image}",
                 f"export APPTAINER={fake_apptainer}",
@@ -321,6 +344,7 @@ def test_train_driver_shares_host_pid_namespace_with_ray_head(
     assert "--contain" in apptainer_args
     assert "--containall" not in apptainer_args
     assert "cluster.num_nodes=2" in uv_log.read_text().splitlines()
+    assert "checkpointing.save_period=5" in uv_log.read_text().splitlines()
     assert f"policy.tokenizer.name={TOKENIZER_ID}" in uv_log.read_text().splitlines()
     assert (
         f"+policy.generation.vllm_kwargs.tokenizer={TOKENIZER_ID}"

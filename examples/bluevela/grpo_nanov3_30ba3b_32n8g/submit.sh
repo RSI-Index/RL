@@ -242,6 +242,7 @@ source_commit=${SOURCE_COMMIT:-$(git -C "$repo_dir" rev-parse HEAD)}
 run_id=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-grpo-nanov3-32n8g-yuetai}
 run_dir=${RUN_DIR:-${run_root}/nemo-rl-nanov3-32n/${run_id}}
 checkpoint_dir=${CHECKPOINT_DIR:-${run_dir}/checkpoints}
+checkpoint_save_period=${CHECKPOINT_SAVE_PERIOD:-}
 wandb_key_file=${WANDB_API_KEY_FILE:-${HOME:?}/.config/megatron-bridge/wandb_api_key}
 hf_token_file=${HF_TOKEN_FILE:-${HOME:?}/.cache/huggingface/token}
 
@@ -274,6 +275,10 @@ validate_identifier TRAIN_JOB_NAME "$train_job_name"
     || die "TRAIN_SLOTS must equal TRAIN_HOSTS * ${train_slots_per_host}"
 [[ $gpu_requirement == num=8:mode=shared:j_exclusive=yes ]] \
     || die "GPU_REQUIREMENT must reserve all eight GPUs per host"
+if [[ -n $checkpoint_save_period ]]; then
+    [[ $checkpoint_save_period =~ ^[1-9][0-9]*$ ]] \
+        || die "CHECKPOINT_SAVE_PERIOD must be a positive integer"
+fi
 
 prep_resource="span[hosts=1] select[tmp>${prep_tmp_mb}] rusage[mem=${prep_memory_mb}]"
 train_resource="span[ptile=${train_slots_per_host}] rusage[mem=${train_memory_mb}]"
@@ -303,6 +308,7 @@ render() {
     echo "Run ID: ${run_id}"
     echo "Run directory: ${run_dir}"
     echo "Checkpoint directory: ${checkpoint_dir}"
+    echo "Checkpoint save period override: ${checkpoint_save_period:-config default}"
     echo "Cache root: ${cache_root}"
     echo "Container image: ${container_image}"
     echo "Source: ${source_repo} @ ${source_commit}"
@@ -372,6 +378,9 @@ chmod 700 \
     write_export RUN_ID "$run_id"
     write_export RUN_DIR "$run_dir"
     write_export CHECKPOINT_DIR "$checkpoint_dir"
+    if [[ -n $checkpoint_save_period ]]; then
+        write_export CHECKPOINT_SAVE_PERIOD "$checkpoint_save_period"
+    fi
     write_export CACHE_ROOT "$cache_root"
     write_export CONTAINER_IMAGE "$container_image"
     write_export APPTAINER "$apptainer"
@@ -396,6 +405,8 @@ sha256sum \
     printf 'run_id=%s\n' "$run_id"
     printf 'run_dir=%s\n' "$run_dir"
     printf 'checkpoint_dir=%s\n' "$checkpoint_dir"
+    printf 'checkpoint_save_period_override=%s\n' \
+        "${checkpoint_save_period:-config default}"
     printf 'submitted_at_utc=%s\n' "$(date -u +%FT%TZ)"
     printf 'source_repo=%s\n' "$source_repo"
     printf 'source_commit=%s\n' "$source_commit"

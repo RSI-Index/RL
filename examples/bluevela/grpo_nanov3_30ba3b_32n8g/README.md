@@ -66,9 +66,19 @@ Training is complete only when `RUN_DIR/status/SUCCESS` exists. Failures write
 `PREP_FAILED`, `TRAIN_FAILED`, or per-node Ray logs under `RUN_DIR/logs/ray/`.
 
 The recipe's `checkpoint_must_save_by: 00:03:40:00` intentionally checkpoints
-and exits before the four-hour LSF limit. If the epoch needs another allocation,
-submit a new immutable run directory while pointing it at the prior checkpoint
-directory:
+and exits before the four-hour LSF limit.
+
+To override only the step-based checkpoint cadence for a future allocation,
+set `CHECKPOINT_SAVE_PERIOD` when submitting. For example, the following saves
+every five training steps while leaving the time-based deadline unchanged:
+
+```bash
+CHECKPOINT_SAVE_PERIOD=5 \
+  bash examples/bluevela/grpo_nanov3_30ba3b_32n8g/submit.sh --submit
+```
+
+If the epoch needs another allocation, submit a new immutable run directory
+while pointing it at the prior checkpoint directory:
 
 ```bash
 CHECKPOINT_DIR=/proj/.../previous-run/checkpoints \

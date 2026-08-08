@@ -401,6 +401,11 @@ run_dir=$4
 run_id=$5
 checkpoint_dir=$6
 expected_host_count=$7
+checkpoint_save_period=${8:-}
+checkpoint_overrides=()
+if [[ -n $checkpoint_save_period ]]; then
+    checkpoint_overrides+=("checkpointing.save_period=$checkpoint_save_period")
+fi
 cd /opt/nemo-rl
 uv run examples/nemo_gym/run_grpo_nemo_gym.py \
     --config examples/nemo_gym/grpo_nanov3.yaml \
@@ -415,9 +420,10 @@ uv run examples/nemo_gym/run_grpo_nemo_gym.py \
     logger.wandb.project=nemo-rl \
     "logger.wandb.name=$run_id" \
     logger.tensorboard_enabled=true \
-    "checkpointing.checkpoint_dir=$checkpoint_dir"
+    "checkpointing.checkpoint_dir=$checkpoint_dir" \
+    "${checkpoint_overrides[@]}"
 ' -- "$MODEL_ID" "$tokenizer_id" "$prepared_data_dir" "$run_dir" "$RUN_ID" "$CHECKPOINT_DIR" \
-    "$expected_host_count" \
+    "$expected_host_count" "${CHECKPOINT_SAVE_PERIOD:-}" \
     2>&1 | tee "$driver_log"
 driver_status=${PIPESTATUS[0]}
 set -e
