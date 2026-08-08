@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+
+run_dir=${1:?usage: prepare.sh RUN_DIR}
+# shellcheck source=/dev/null
+source "$run_dir/control/run.env"
+
+readonly image_uri="docker://nvcr.io/nvidia/nemo-rl:v0.7.0"
+readonly prep_marker="$run_dir/status/PREP_SUCCESS"
+readonly failure_marker="$run_dir/status/PREP_FAILED"
+readonly vllm_actor="nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
+readonly vllm_venv_root="$CACHE_ROOT/ray_venvs/$SOURCE_COMMIT"
+readonly vllm_venv_dir="$vllm_venv_root/$vllm_actor"
+readonly vllm_venv_marker="$vllm_venv_dir/VENV_SUCCESS"
+job_id=${LSB_JOBID:-$$}
+node_tmp="/tmp/nrl-super-swe1-prep-${job_id}"
+
+case "$node_tmp" in
+    /tmp/nrl-super-swe1-prep-[0-9]*) ;;
+    *)
+        echo "refusing unsafe temporary path: ${node_tmp}" >&2
+        exit 2
+        ;;
+esac
+
+cleanup() {
+    local status=$?
+    printf 'finished_at_utc=%s\nexit_status=%s\n' "$(date -u +%FT%TZ)" "$status" \
+        >>"$run_dir/logs/prep-status.log"
+    if (( status != 0 )); then
+        printf 'failed_at_utc=%s\nexit_status=%s\njob_id=%s\n' \
+            "$(date -u +%FT%TZ)" "$status" "$job_id" >"${failure_marker}.tmp"
+        mv "${failure_marker}.tmp" "$failure_marker"
+    fi
+    rm -rf -- "$node_tmp"
+    exit "$status"
+}
+trap cleanup EXIT
+
+rm -f "$prep_marker" "$failure_marker"
+mkdir -p \
+    "$node_tmp/apptainer-tmp" "$node_tmp/ray" \
+    "$run_dir/logs" "$run_dir/status" "$run_dir/tmp" "$run_dir/home" \
+    "$CACHE_ROOT/apptainer-cache" "$CACHE_ROOT/huggingface/gym_venvs" \
+    "$CACHE_ROOT/huggingface" "$CACHE_ROOT/hf_modules" \
+    "$CACHE_ROOT/uv" "$CACHE_ROOT/xdg" "$CACHE_ROOT/torch" \
+    "$CACHE_ROOT/triton" "$CACHE_ROOT/inductor" \
+    "$vllm_venv_root" \
+    "$CACHE_ROOT/vllm_compile_cache" "$CACHE_ROOT/flashinfer_cubins" \
+    "$CACHE_ROOT/flashinfer_workspace" "$(dirname -- "$CONTAINER_IMAGE")"
+
+printf 'started_at_utc=%s\njob_id=%s\nhost=%s\n' \
+    "$(date -u +%FT%TZ)" "$job_id" "$(hostname -f)" \
+    >"$run_dir/logs/prep-status.log"
+
+[[ -x $APPTAINER ]] || {
+    echo "Apptainer is not executable: ${APPTAINER}" >&2
+    exit 2
+}
+
+source_dir="$run_dir/source"
+if [[ ! -d $source_dir/.git ]]; then
+    [[ ! -e $source_dir ]] || {
+        echo "source path exists but is not a Git checkout: ${source_dir}" >&2
+        exit 2
+    }
+    mkdir -p "$source_dir"
+    git -C "$source_dir" init
+    git -C "$source_dir" remote add origin "$SOURCE_REPO"
+    git -C "$source_dir" fetch --depth 1 origin "$SOURCE_COMMIT"
+    git -C "$source_dir" checkout --detach FETCH_HEAD
+fi
+[[ $(git -C "$source_dir" rev-parse HEAD) == "$SOURCE_COMMIT" ]] || {
+    echo "source checkout is not pinned to ${SOURCE_COMMIT}" >&2
+    exit 2
+}
+git -C "$source_dir" submodule sync --recursive
+git -C "$source_dir" submodule update --init --recursive --depth 1
+if git -C "$source_dir" submodule status --recursive | grep -Eq '^[+-U]'; then
+    echo "one or more submodules are missing or not pinned" >&2
+    git -C "$source_dir" submodule status --recursive >&2
+    exit 2
+fi
+[[ -f "$source_dir/$TARGET_TEST" ]] || {
+    echo "target test is absent at pinned commit: ${TARGET_TEST}" >&2
+    exit 2
+}
+
+validate_image() {
+    "$APPTAINER" exec --fakeroot --containall --no-mount home --pwd / "$CONTAINER_IMAGE" \
+        /bin/bash -ce \
+        'test -d /opt/nemo-rl; test -x /opt/nemo_rl_venv/bin/python; command -v uv >/dev/null'
+}
+
+if [[ -s $CONTAINER_IMAGE ]]; then
+    validate_image || {
+        echo "existing image is not a compatible NeMo-RL v0.7.0 image: ${CONTAINER_IMAGE}" >&2
+        exit 2
+    }
+else
+    local_sif="$node_tmp/nemo-rl-v0.7.0.sif"
+    partial_sif="${CONTAINER_IMAGE}.partial.${job_id}"
+    rm -f "$partial_sif"
+    APPTAINER_TMPDIR="$node_tmp/apptainer-tmp" \
+    APPTAINER_CACHEDIR="$CACHE_ROOT/apptainer-cache" \
+        "$APPTAINER" build --fakeroot "$local_sif" "$image_uri"
+    [[ -s $local_sif ]] || {
+        echo "Apptainer build did not produce a SIF" >&2
+        exit 2
+    }
+    cp "$local_sif" "$partial_sif"
+    chmod 444 "$partial_sif"
+    mv "$partial_sif" "$CONTAINER_IMAGE"
+    validate_image
+fi
+sha256sum "$CONTAINER_IMAGE" >"$run_dir/status/container.sha256"
+
+read_secret() {
+    local name=$1
+    local path=$2
+    local mode value
+    [[ -f $path && ! -L $path && -s $path ]] || {
+        echo "${name} file is missing or unsafe: ${path}" >&2
+        return 1
+    }
+    mode=$(stat -c %a "$path")
+    (( (8#$mode & 077) == 0 )) || {
+        echo "${name} file permissions are too broad: ${path}" >&2
+        return 1
+    }
+    IFS= read -r value <"$path" || true
+    value=${value%$'\r'}
+    [[ -n $value ]] || {
+        echo "${name} file is empty: ${path}" >&2
+        return 1
+    }
+    printf -v "$name" '%s' "$value"
+    export "${name?}"
+}
+
+read_secret HF_TOKEN "$HF_TOKEN_FILE"
+export APPTAINERENV_HF_TOKEN="$HF_TOKEN"
+
+container=(
+    "$APPTAINER" exec
+    --fakeroot
+    --containall
+    --writable-tmpfs
+    --no-mount home
+    --bind "$source_dir:/opt/nemo-rl"
+    --bind "$CACHE_ROOT:$CACHE_ROOT"
+    --bind "$run_dir:$run_dir"
+    --bind "$node_tmp:/job-tmp"
+    --bind "$CACHE_ROOT/huggingface/gym_venvs:/opt/gym_venvs"
+    --bind /etc/resolv.conf:/etc/resolv.conf:ro
+    --pwd /opt/nemo-rl
+    --env "HF_HOME=$CACHE_ROOT/huggingface"
+    --env "HF_MODULES_CACHE=$CACHE_ROOT/hf_modules"
+    --env "XDG_CACHE_HOME=$CACHE_ROOT/xdg"
+    --env "UV_CACHE_DIR=$CACHE_ROOT/uv"
+    --env UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv
+    --env VIRTUAL_ENV=/opt/nemo_rl_venv
+    --env UV_NO_SYNC=1
+    --env UV_LINK_MODE=copy
+    --env UV_HTTP_TIMEOUT=600
+    --env NRL_CONTAINER=1
+    --env NRL_IGNORE_VERSION_MISMATCH=1
+    --env NEMO_GYM_VENV_DIR=/opt/gym_venvs
+    --env "PERSISTENT_CACHE=$CACHE_ROOT"
+    --env "RAY_TMPDIR=/job-tmp/ray"
+    --env "TMPDIR=/job-tmp"
+    --env "TORCH_HOME=$CACHE_ROOT/torch"
+    --env "TRITON_CACHE_DIR=$CACHE_ROOT/triton"
+    --env "TORCHINDUCTOR_CACHE_DIR=$CACHE_ROOT/inductor"
+    --env "VLLM_CACHE_ROOT=$CACHE_ROOT/vllm_compile_cache"
+    --env "FLASHINFER_CUBIN_DIR=$CACHE_ROOT/flashinfer_cubins"
+    --env "FLASHINFER_WORKSPACE_BASE=$CACHE_ROOT/flashinfer_workspace"
+    --env PATH=/opt/nemo_rl_venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    "$CONTAINER_IMAGE"
+)
+
+"${container[@]}" /bin/bash -ce '
+test -x /opt/nemo_rl_venv/bin/python
+command -v uv
+command -v hf
+python -c "import nemo_rl, ray, torch; print(nemo_rl.__version__, ray.__version__, torch.__version__)"
+'
+
+"${container[@]}" hf download Qwen/Qwen3-1.7B
+model_snapshot=$(find \
+    "$CACHE_ROOT/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots" \
+    -mindepth 2 -maxdepth 2 -name config.json -printf '%h\n' \
+    | sort | tail -n 1)
+[[ -n $model_snapshot && -s $model_snapshot/config.json ]] || {
+    echo "Qwen/Qwen3-1.7B snapshot validation failed: ${model_snapshot}" >&2
+    exit 2
+}
+printf 'model=Qwen/Qwen3-1.7B\nsnapshot=%s\n' "$model_snapshot" \
+    >"$run_dir/status/model.ready"
+
+data_marker="$CACHE_ROOT/huggingface/superv3_data/swe1/DATA_SUCCESS"
+if [[ ! -s $data_marker ]]; then
+    placeholders="$CACHE_ROOT/super_data_placeholders"
+    filled="$run_dir/tmp/super_data_filled_${job_id}"
+    split_build="$CACHE_ROOT/huggingface/superv3_data/swe1.build.${job_id}"
+    mkdir -p "$placeholders"
+    rm -rf -- "$filled" "$split_build"
+    "${container[@]}" hf download \
+        nvidia/Nemotron-RL-Super-Training-Blends \
+        --repo-type dataset --local-dir "$placeholders"
+    "${container[@]}" python "$placeholders/fill_placeholders.py" \
+        --input-dir "$placeholders" --output-dir "$filled"
+    swe1_file="$filled/swe1.jsonl"
+    [[ -s $swe1_file ]] || {
+        echo "prepared SWE1 source file is missing: ${swe1_file}" >&2
+        exit 2
+    }
+    mkdir -p "$split_build"
+    head -n -100 "$swe1_file" >"$split_build/train-split.jsonl"
+    tail -n 100 "$swe1_file" >"$split_build/val-split.jsonl"
+    [[ -s $split_build/train-split.jsonl && -s $split_build/val-split.jsonl ]] || {
+        echo "SWE1 split files are empty" >&2
+        exit 2
+    }
+    printf 'prepared_at_utc=%s\nsource=%s\n' \
+        "$(date -u +%FT%TZ)" "nvidia/Nemotron-RL-Super-Training-Blends" \
+        >"$split_build/DATA_SUCCESS"
+    final_split_dir="$CACHE_ROOT/huggingface/superv3_data/swe1"
+    if [[ -e $final_split_dir ]]; then
+        mv "$final_split_dir" "${final_split_dir}.incomplete.${job_id}"
+    fi
+    mv "$split_build" "$final_split_dir"
+fi
+[[ -s "$CACHE_ROOT/huggingface/superv3_data/swe1/train-split.jsonl" ]]
+[[ -s "$CACHE_ROOT/huggingface/superv3_data/swe1/val-split.jsonl" ]]
+
+if [[ ! -s $vllm_venv_marker ]]; then
+    vllm_venv_build="${vllm_venv_dir}.build.${job_id}"
+    [[ ! -e $vllm_venv_build ]] || {
+        echo "refusing existing vLLM venv build path: ${vllm_venv_build}" >&2
+        exit 2
+    }
+    mkdir -p "$vllm_venv_build"
+    # Positional parameters are passed to the container-side shell below.
+    # shellcheck disable=SC2016
+    "${container[@]}" /bin/bash -ce '
+unset UV_NO_SYNC UV_PROJECT_ENVIRONMENT VIRTUAL_ENV
+build_dir=$1
+actor=$2
+cp -a --reflink=auto "/opt/ray_venvs/$actor/." "$build_dir/"
+ray_version=$("$build_dir/bin/python" -c "import importlib.metadata; print(importlib.metadata.version(\"ray\"))")
+torch_version=$("$build_dir/bin/python" -c "import importlib.metadata; print(importlib.metadata.version(\"torch\"))")
+uv pip install \
+  --python "$build_dir/bin/python" \
+  --index https://flashinfer.ai/whl/cu130 \
+  "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.25.1/vllm-0.25.1-cp38-abi3-manylinux_2_28_x86_64.whl" \
+  "flashinfer-jit-cache==0.6.13+cu130"
+PYTHONPATH=/opt/nemo-rl "$build_dir/bin/python" - "$ray_version" "$torch_version" <<"PY"
+import importlib.metadata
+import sys
+
+expected_ray, expected_torch = sys.argv[1:]
+assert importlib.metadata.version("vllm") == "0.25.1"
+assert importlib.metadata.version("flashinfer-jit-cache") == "0.6.13+cu130"
+assert importlib.metadata.version("ray") == expected_ray
+assert importlib.metadata.version("torch") == expected_torch
+vllm_dist = importlib.metadata.distribution("vllm")
+serving_file = next(
+    path
+    for path in vllm_dist.files
+    if str(path).endswith("vllm/entrypoints/serve/tokenize/serving.py")
+)
+serving_source = vllm_dist.locate_file(serving_file).read_text()
+assert "class ServingTokenization" in serving_source
+PY
+' -- "$vllm_venv_build" "$vllm_actor"
+    printf 'prepared_at_utc=%s\nsource_commit=%s\nvllm_version=0.25.1\n' \
+        "$(date -u +%FT%TZ)" "$SOURCE_COMMIT" >"$vllm_venv_build/VENV_SUCCESS"
+    if [[ -e $vllm_venv_dir ]]; then
+        mv "$vllm_venv_dir" "${vllm_venv_dir}.incomplete.${job_id}"
+    fi
+    mv "$vllm_venv_build" "$vllm_venv_dir"
+fi
+# The venv Python is an absolute symlink into the container's /root tree, so it
+# intentionally appears broken (and therefore non-executable) on the LSF host.
+[[ -L "$vllm_venv_dir/bin/python" && -s $vllm_venv_marker ]]
+
+gym_venv_dir="$CACHE_ROOT/huggingface/gym_venvs"
+gym_marker="$gym_venv_dir/GYM_SUCCESS"
+if [[ ! -s $gym_marker ]]; then
+    "${container[@]}" /bin/bash -ce '
+trap "ray stop --force >/dev/null 2>&1 || true" EXIT
+python examples/nemo_gym/prefetch_venvs.py \
+  examples/configs/recipes/llm/grpo-qwen3-1.7b-1n8g-megatron-super-swe1.yaml
+'
+    find "$gym_venv_dir" -mindepth 1 -maxdepth 3 -type d -name .venv -print -quit \
+        | grep -q . || {
+        echo "NeMo Gym prefetch produced no cached venv" >&2
+        exit 2
+    }
+    printf 'prepared_at_utc=%s\nsource_commit=%s\n' \
+        "$(date -u +%FT%TZ)" "$SOURCE_COMMIT" >"$gym_marker"
+fi
+
+[[ -s $gym_marker ]]
+git -C "$source_dir" diff --quiet
+git -C "$source_dir" diff --cached --quiet
+
+{
+    printf 'prepared_at_utc=%s\n' "$(date -u +%FT%TZ)"
+    printf 'job_id=%s\n' "$job_id"
+    printf 'source_commit=%s\n' "$SOURCE_COMMIT"
+    printf 'container_image=%s\n' "$CONTAINER_IMAGE"
+    printf 'container_sha256=%s\n' "$(cut -d ' ' -f 1 "$run_dir/status/container.sha256")"
+    printf 'model_snapshot=%s\n' "$model_snapshot"
+    printf 'train_data=%s\n' "$CACHE_ROOT/huggingface/superv3_data/swe1/train-split.jsonl"
+    printf 'validation_data=%s\n' "$CACHE_ROOT/huggingface/superv3_data/swe1/val-split.jsonl"
+    printf 'gym_venv_dir=%s\n' "$gym_venv_dir"
+    printf 'vllm_worker_venv=%s\n' "$vllm_venv_dir"
+} >"${prep_marker}.tmp"
+mv "${prep_marker}.tmp" "$prep_marker"
+
+echo "Preparation complete: ${prep_marker}"
