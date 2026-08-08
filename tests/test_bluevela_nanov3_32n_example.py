@@ -48,7 +48,9 @@ def test_dry_run_renders_32_node_contract_without_writing(tmp_path: Path) -> Non
     assert not run_dir.exists()
 
 
-def test_dry_run_renders_two_node_batch_smoke_contract(tmp_path: Path) -> None:
+def test_dry_run_renders_two_node_batch_contract_without_training_overrides(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "must-not-exist"
     env = {
         **os.environ,
@@ -57,7 +59,6 @@ def test_dry_run_renders_two_node_batch_smoke_contract(tmp_path: Path) -> None:
         "SOURCE_COMMIT": "e496258b00000000000000000000000000000000",
         "TRAIN_HOSTS": "2",
         "TRAIN_WALLTIME": "02:00",
-        "NANOV3_INTERACTIVE_SMOKE": "1",
     }
 
     result = subprocess.run(
@@ -72,7 +73,7 @@ def test_dry_run_renders_two_node_batch_smoke_contract(tmp_path: Path) -> None:
     assert "-n 34" in rendered
     assert "2 hosts x 8 GPUs = 16 GPUs" in rendered
     assert "-W 02:00" in rendered
-    assert "Smoke mode: 1" in rendered
+    assert "Smoke mode" not in rendered
     assert not run_dir.exists()
 
 
@@ -123,13 +124,22 @@ def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     assert ENTRYPOINT in train
     assert CONFIG in train
     assert "CHECKPOINT_DIR" in submit
-    assert 'write_export NANOV3_INTERACTIVE_SMOKE "$nanov3_interactive_smoke"' in submit
     assert 'printf \'training_shape=%s hosts x 8 GPUs\\n\' "$train_hosts"' in submit
     assert "CHECKPOINT_DIR" in train
     assert "data.train.data_path" in train
     assert "data.validation.data_path" in train
     assert "status/SUCCESS" in train
     assert "TRAIN_FAILED" in train
+    assert "smoke_overrides" not in train
+    for forbidden_override in (
+        "grpo.num_prompts_per_step=2",
+        "grpo.num_generations_per_prompt=4",
+        "grpo.max_num_steps=1",
+        "policy.train_global_batch_size=4",
+        "policy.generation.max_new_tokens=512",
+        "checkpointing.enabled=false",
+    ):
+        assert forbidden_override not in train
 
 
 def test_train_driver_shares_host_pid_namespace_with_ray_head(
@@ -252,7 +262,6 @@ def test_train_driver_shares_host_pid_namespace_with_ray_head(
         "UV_ARGS_LOG": str(uv_log),
         "LSB_JOBID": job_id,
         "LSB_MCPU_HOSTS": f"{socket.gethostname().split('.')[0]} 8 worker 8",
-        "NANOV3_INTERACTIVE_SMOKE": "1",
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
     }
     try:
@@ -276,7 +285,7 @@ def test_train_driver_shares_host_pid_namespace_with_ray_head(
         f"+policy.generation.vllm_kwargs.tokenizer={TOKENIZER_ID}"
         in uv_log.read_text().splitlines()
     )
-    smoke_overrides = {
+    forbidden_training_overrides = {
         "grpo.num_prompts_per_step=2",
         "grpo.num_generations_per_prompt=4",
         "grpo.max_num_steps=1",
@@ -284,7 +293,7 @@ def test_train_driver_shares_host_pid_namespace_with_ray_head(
         "policy.generation.max_new_tokens=512",
         "checkpointing.enabled=false",
     }
-    assert smoke_overrides <= set(uv_log.read_text().splitlines())
+    assert forbidden_training_overrides.isdisjoint(uv_log.read_text().splitlines())
     assert (run_dir / "status/SUCCESS").is_file()
 
 
