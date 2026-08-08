@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -44,11 +45,31 @@ from nemo_rl.models.generation.vllm.vllm_worker import (
 )
 from nemo_rl.models.generation.vllm.vllm_worker_async import (
     VllmAsyncGenerationWorkerImpl,
+    _defer_vllm_output_handler_to_http_loop,
 )
 from nemo_rl.models.policy import LoRAConfig, PolicyConfig
 from nemo_rl.models.policy.lm_policy import Policy
 
 model_name = "Qwen/Qwen3-0.6B"
+
+
+@pytest.mark.asyncio
+async def test_vllm_http_output_handler_is_recreated_on_http_loop():
+    output_handler = asyncio.create_task(asyncio.Event().wait())
+    llm = types.SimpleNamespace(output_handler=output_handler)
+
+    assert _defer_vllm_output_handler_to_http_loop(llm)
+    assert llm.output_handler is None
+    await asyncio.sleep(0)
+    assert output_handler.cancelled()
+
+
+def test_vllm_http_output_handler_defer_is_noop_outside_async_construction():
+    llm = types.SimpleNamespace(output_handler=None)
+
+    assert not _defer_vllm_output_handler_to_http_loop(llm)
+
+
 # Define basic vLLM test config
 basic_vllm_test_config: VllmConfig = {
     "backend": "vllm",

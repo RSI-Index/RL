@@ -57,6 +57,30 @@ from nemo_rl.models.generation.openai_server_utils import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _defer_vllm_output_handler_to_http_loop(llm: Any) -> bool:
+    """Cancel an eagerly-created output handler before the HTTP loop starts.
+
+    ``AsyncLLM`` eagerly creates its output-handler task when constructed from
+    an async Ray actor method. NeMo RL serves OpenAI requests from a separate
+    uvicorn thread, so leaving that task on the Ray loop makes it mutate
+    request collectors owned by the HTTP loop. Under concurrent cancellation
+    this can corrupt ``asyncio.Event`` waiter iteration. Clearing the task here
+    lets vLLM recreate it on the first HTTP request's owning loop.
+    """
+    output_handler = llm.output_handler
+    if output_handler is None:
+        return False
+
+    current_loop = asyncio.get_running_loop()
+    if output_handler.get_loop() is not current_loop:
+        raise RuntimeError(
+            "eager vLLM output handler is owned by an unexpected event loop"
+        )
+    output_handler.cancel()
+    llm.output_handler = None
+    return True
+
+
 class VllmAsyncGenerationWorkerImpl(
     VllmAsyncCheckpointEngineRpcMixin, BaseVllmGenerationWorker
 ):
@@ -199,6 +223,14 @@ class VllmAsyncGenerationWorkerImpl(
         )
 
         if self.cfg["vllm_cfg"].get("expose_http_server"):
+            # ``AsyncLLM.__init__`` starts the output handler immediately when
+            # Ray invokes this synchronous method from an asyncio actor loop.
+            # The HTTP server owns all request queues and must also own the
+            # output handler that writes to them.
+            if _defer_vllm_output_handler_to_http_loop(self.llm):
+                LOGGER.info(
+                    "Deferred eager vLLM output handler to the HTTP server event loop"
+                )
             # Must run after AsyncLLM.from_engine_args and before
             # _setup_vllm_server spawns the uvicorn thread.
             self._install_engine_input_socket_lock()
