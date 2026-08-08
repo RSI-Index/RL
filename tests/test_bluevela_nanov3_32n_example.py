@@ -114,6 +114,9 @@ def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     assert "--min-worker-port=2000" in ray_node
     assert "--max-worker-port=2999" in ray_node
     assert "RAY_STOP" in ray_node
+    assert "container_start_attempts=${CONTAINER_START_ATTEMPTS:-3}" in ray_node
+    assert "status != 255 || attempt == container_start_attempts" in ray_node
+    assert "Apptainer startup returned status 255" in ray_node
     for payload in (ray_node, train):
         assert "--bind /dev/infiniband:/dev/infiniband" in payload
         assert "RDMA devices" in payload

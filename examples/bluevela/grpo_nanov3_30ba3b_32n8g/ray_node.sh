@@ -219,7 +219,30 @@ if [[ -n ${CUDA_VISIBLE_DEVICES:-} ]]; then
         --env "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" "$CONTAINER_IMAGE")
 fi
 
-"${container[@]}" /bin/bash -ce '
+container_start_attempts=${CONTAINER_START_ATTEMPTS:-3}
+[[ $container_start_attempts =~ ^[1-9][0-9]*$ ]] || {
+    echo "CONTAINER_START_ATTEMPTS must be a positive integer" >&2
+    exit 2
+}
+
+run_container_with_startup_retry() {
+    local attempt status
+    for ((attempt = 1; attempt <= container_start_attempts; attempt++)); do
+        if "${container[@]}" "$@"; then
+            return 0
+        else
+            status=$?
+        fi
+        if (( status != 255 || attempt == container_start_attempts )); then
+            return "$status"
+        fi
+        echo "Apptainer startup returned status 255 on Ray node rank ${rank};" \
+            " retrying in 10 seconds (${attempt}/${container_start_attempts})." >&2
+        sleep 10
+    done
+}
+
+run_container_with_startup_retry /bin/bash -ce '
 shopt -s nullglob
 rdma_devices=(/dev/infiniband/*)
 rdma_hcas=(/sys/class/infiniband/*)
@@ -239,8 +262,7 @@ printf " %s" "${rdma_hcas[@]##*/}"
 printf "\n"
 '
 
-"${container[@]}" /bin/bash -s -- \
-    "$role" "$head_address" "$rank" "$ready_marker" "$stop_marker" <<'INNER'
+read -r -d '' ray_node_inner <<'INNER' || true
 set -euo pipefail
 
 role=$1
@@ -313,3 +335,6 @@ done
 
 ray stop --force
 INNER
+
+run_container_with_startup_retry /bin/bash -ce "$ray_node_inner" -- \
+    "$role" "$head_address" "$rank" "$ready_marker" "$stop_marker"
