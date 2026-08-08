@@ -244,6 +244,19 @@ export APPTAINERENV_HF_TOKEN="$HF_TOKEN"
 export APPTAINERENV_WANDB_API_KEY="$WANDB_API_KEY"
 export APPTAINERENV_NCCL_IB_HCA='^=mlx5_1,mlx5_6'
 export APPTAINERENV_NCCL_SOCKET_IFNAME='=ibp26s0,ibp60s0,ibp77s0,ibp94s0,ibp156s0,ibp188s0,ibp204s0,ibp220s0'
+export APPTAINERENV_NCCL_DEBUG=INFO
+export APPTAINERENV_NCCL_DEBUG_SUBSYS=INIT,NET
+
+shopt -s nullglob
+rdma_devices=(/dev/infiniband/*)
+shopt -u nullglob
+(( ${#rdma_devices[@]} > 0 )) || {
+    echo "Host RDMA devices are missing on $(hostname -s)" >&2
+    exit 2
+}
+printf 'Host RDMA devices on %s:' "$(hostname -s)"
+printf ' %s' "${rdma_devices[@]##*/}"
+printf '\n'
 
 head_node_tmp="/tmp/nrl-nanov3-ray-${job_id}-0"
 case "$head_node_tmp" in
@@ -271,6 +284,7 @@ container=(
     --bind "$head_node_tmp:/job-tmp"
     --bind "$CACHE_ROOT/huggingface/gym_venvs:/opt/gym_venvs"
     --bind "$vllm_venv_dir:/opt/ray_venvs/$vllm_actor"
+    --bind /dev/infiniband:/dev/infiniband
     --bind /etc/resolv.conf:/etc/resolv.conf:ro
     --pwd /opt/nemo-rl
     --env "USER=$(id -un)"
@@ -323,6 +337,26 @@ if [[ -n ${CUDA_VISIBLE_DEVICES:-} ]]; then
     container=("${container[@]:0:${#container[@]}-1}" \
         --env "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" "$CONTAINER_IMAGE")
 fi
+
+"${container[@]}" /bin/bash -ce '
+shopt -s nullglob
+rdma_devices=(/dev/infiniband/*)
+rdma_hcas=(/sys/class/infiniband/*)
+shopt -u nullglob
+(( ${#rdma_devices[@]} > 0 )) || {
+    echo "Container RDMA devices are missing" >&2
+    exit 2
+}
+(( ${#rdma_hcas[@]} > 0 )) || {
+    echo "Container RDMA HCAs are missing" >&2
+    exit 2
+}
+printf "Container RDMA devices:"
+printf " %s" "${rdma_devices[@]##*/}"
+printf "\nContainer RDMA HCAs:"
+printf " %s" "${rdma_hcas[@]##*/}"
+printf "\n"
+'
 
 "${container[@]}" python - "$head_address" "$head_ip" "$expected_host_count" "$expected_gpu_total" <<'PY'
 import sys

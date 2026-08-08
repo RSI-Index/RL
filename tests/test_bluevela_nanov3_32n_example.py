@@ -114,6 +114,11 @@ def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     assert "--min-worker-port=2000" in ray_node
     assert "--max-worker-port=2999" in ray_node
     assert "RAY_STOP" in ray_node
+    for payload in (ray_node, train):
+        assert "--bind /dev/infiniband:/dev/infiniband" in payload
+        assert "RDMA devices" in payload
+        assert "APPTAINERENV_NCCL_DEBUG=INFO" in payload
+        assert "APPTAINERENV_NCCL_DEBUG_SUBSYS=INIT,NET" in payload
 
     assert "LSB_MCPU_HOSTS" in train
     assert 'expected ${expected_host_count} allocated hosts' in train
