@@ -22,8 +22,12 @@ source "$run_dir/control/run.env"
 readonly expected_entrypoint="examples/nemo_gym/run_grpo_nemo_gym.py"
 readonly expected_config="examples/nemo_gym/grpo_nanov3.yaml"
 readonly expected_model="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
+readonly expected_tokenizer="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+tokenizer_id=${TOKENIZER_ID:-$expected_tokenizer}
+smoke_mode=${NANOV3_INTERACTIVE_SMOKE:-0}
 expected_host_count=${TRAIN_EXPECTED_HOSTS:-32}
 readonly expected_gpus_per_host=8
+expected_slots_per_host=${TRAIN_SLOTS_PER_HOST:-8}
 expected_gpu_total=$((expected_host_count * 8))
 readonly success_marker="$run_dir/status/SUCCESS"
 readonly failure_marker="$run_dir/status/TRAIN_FAILED"
@@ -46,6 +50,17 @@ ray_launch_pids=()
     echo "refusing unexpected model: ${MODEL_ID}" >&2
     exit 2
 }
+[[ $tokenizer_id == "$expected_tokenizer" ]] || {
+    echo "refusing unexpected tokenizer: ${tokenizer_id}" >&2
+    exit 2
+}
+case "$smoke_mode" in
+    0 | 1) ;;
+    *)
+        echo "NANOV3_INTERACTIVE_SMOKE must be 0 or 1, got: ${smoke_mode}" >&2
+        exit 2
+        ;;
+esac
 
 cleanup() {
     local status=$?
@@ -132,8 +147,8 @@ hosts=()
 for ((i = 0; i < ${#host_slot_fields[@]}; i += 2)); do
     host=${host_slot_fields[i]}
     slots=${host_slot_fields[i + 1]}
-    [[ $slots == "$expected_gpus_per_host" ]] || {
-        echo "expected ${expected_gpus_per_host} LSF slots on ${host}, found ${slots}" >&2
+    [[ $slots == "$expected_slots_per_host" ]] || {
+        echo "expected ${expected_slots_per_host} LSF slots on ${host}, found ${slots}" >&2
         exit 2
     }
     hosts+=("$host")
@@ -168,7 +183,7 @@ head_address="${head_ip}:1200"
 printf '%s\n' "${hosts[@]}" >"$run_dir/status/allocated-hosts.txt"
 printf 'head_host=%s\nhead_ip=%s\nhead_address=%s\n' \
     "$head_host" "$head_ip" "$head_address" >"$run_dir/status/ray-topology.txt"
-echo "Validated LSF allocation: ${#hosts[@]} hosts, 8 slots each"
+echo "Validated LSF allocation: ${#hosts[@]} hosts, ${expected_slots_per_host} slots each"
 echo "Ray head: ${head_host} (${head_address})"
 
 launch_ray_node() {
@@ -256,7 +271,7 @@ container=(
     "$APPTAINER" exec
     --fakeroot
     --nv
-    --containall
+    --contain
     --writable-tmpfs
     --no-mount home
     --bind "$run_dir/source:/opt/nemo-rl"
@@ -355,15 +370,32 @@ set +e
 # shellcheck disable=SC2016
 "${container[@]}" /bin/bash -ce '
 model_id=$1
-data_dir=$2
-run_dir=$3
-run_id=$4
-checkpoint_dir=$5
+tokenizer_id=$2
+data_dir=$3
+run_dir=$4
+run_id=$5
+checkpoint_dir=$6
+expected_host_count=$7
+smoke_mode=$8
+smoke_overrides=()
+if [[ $smoke_mode == 1 ]]; then
+    echo "Interactive smoke overrides enabled"
+    smoke_overrides=(
+        grpo.num_prompts_per_step=2
+        grpo.num_generations_per_prompt=4
+        grpo.max_num_steps=1
+        policy.train_global_batch_size=4
+        policy.generation.max_new_tokens=512
+        checkpointing.enabled=false
+    )
+fi
 cd /opt/nemo-rl
 uv run examples/nemo_gym/run_grpo_nemo_gym.py \
     --config examples/nemo_gym/grpo_nanov3.yaml \
     "cluster.num_nodes=$expected_host_count" \
     "policy.model_name=$model_id" \
+    "policy.tokenizer.name=$tokenizer_id" \
+    "+policy.generation.vllm_kwargs.tokenizer=$tokenizer_id" \
     "data.train.data_path=$data_dir/train-split.jsonl" \
     "data.validation.data_path=$data_dir/val-split.jsonl" \
     "logger.log_dir=$run_dir/nemo_rl_logs" \
@@ -371,8 +403,10 @@ uv run examples/nemo_gym/run_grpo_nemo_gym.py \
     logger.wandb.project=nemo-rl \
     "logger.wandb.name=$run_id" \
     logger.tensorboard_enabled=true \
-    "checkpointing.checkpoint_dir=$checkpoint_dir"
-' -- "$MODEL_ID" "$prepared_data_dir" "$run_dir" "$RUN_ID" "$CHECKPOINT_DIR" \
+    "checkpointing.checkpoint_dir=$checkpoint_dir" \
+    "${smoke_overrides[@]}"
+' -- "$MODEL_ID" "$tokenizer_id" "$prepared_data_dir" "$run_dir" "$RUN_ID" "$CHECKPOINT_DIR" \
+    "$expected_host_count" "$smoke_mode" \
     2>&1 | tee "$driver_log"
 driver_status=${PIPESTATUS[0]}
 set -e

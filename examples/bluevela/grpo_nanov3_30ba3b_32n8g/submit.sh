@@ -21,16 +21,17 @@ repo_dir="$(cd -- "${script_dir}/../../.." && pwd)"
 readonly target_entrypoint="examples/nemo_gym/run_grpo_nemo_gym.py"
 readonly target_config="examples/nemo_gym/grpo_nanov3.yaml"
 readonly model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
+readonly tokenizer_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 readonly default_storage_root="/proj/datasets/interns/yuetai/agent_envs/more_task"
 
 usage() {
     cat <<'EOF'
 Usage: submit.sh [--dry-run|--submit]
 
-  --dry-run  Print the resolved preparation and 32-node training submissions.
+  --dry-run  Print the resolved preparation and training submissions.
              This is the default and does not create the run directory.
   --submit   Create a unique run directory, submit preparation, then submit a
-             dependent 32-host x 8-H100 Nano v3 GRPO training job.
+             dependent Nano v3 GRPO training job.
 EOF
 }
 
@@ -119,12 +120,14 @@ prep_memory_mb=${PREP_MEMORY_MB:-524288}
 prep_walltime=${PREP_WALLTIME:-06:00}
 prep_tmp_mb=${PREP_TMP_MB:-153600}
 train_hosts=${TRAIN_HOSTS:-32}
-train_slots=${TRAIN_SLOTS:-$((train_hosts * 8))}
+train_slots_per_host=17
+train_slots=${TRAIN_SLOTS:-$((train_hosts * train_slots_per_host))}
 train_memory_mb=${TRAIN_MEMORY_MB:-524288}
 train_walltime=${TRAIN_WALLTIME:-04:00}
 gpu_requirement=${GPU_REQUIREMENT:-num=8:mode=shared:j_exclusive=yes}
 prep_job_name=${PREP_JOB_NAME:-nrl-nanov3-32n-prep-yuetai}
 train_job_name=${TRAIN_JOB_NAME:-nrl-nanov3-32n-train-yuetai}
+nanov3_interactive_smoke=${NANOV3_INTERACTIVE_SMOKE:-0}
 
 validate_identifier RUN_ID "$run_id"
 validate_identifier PREP_JOB_NAME "$prep_job_name"
@@ -135,12 +138,17 @@ validate_identifier TRAIN_JOB_NAME "$train_job_name"
 [[ $lsf_group == grp_models ]] || die "LSF_GROUP must be grp_models for this example"
 [[ $prep_slots == 64 ]] || die "PREP_SLOTS must remain 64"
 [[ $train_hosts =~ ^[0-9]+$ && $train_hosts -ge 1 ]] || die "TRAIN_HOSTS must be positive"
-[[ $train_slots == $((train_hosts * 8)) ]] || die "TRAIN_SLOTS must equal TRAIN_HOSTS * 8"
+[[ $train_slots == $((train_hosts * train_slots_per_host)) ]] \
+    || die "TRAIN_SLOTS must equal TRAIN_HOSTS * ${train_slots_per_host}"
 [[ $gpu_requirement == num=8:mode=shared:j_exclusive=yes ]] \
     || die "GPU_REQUIREMENT must reserve all eight GPUs per host"
+case "$nanov3_interactive_smoke" in
+    0 | 1) ;;
+    *) die "NANOV3_INTERACTIVE_SMOKE must be 0 or 1" ;;
+esac
 
 prep_resource="span[hosts=1] select[tmp>${prep_tmp_mb}] rusage[mem=${prep_memory_mb}]"
-train_resource="span[ptile=8] rusage[mem=${train_memory_mb}]"
+train_resource="span[ptile=${train_slots_per_host}] rusage[mem=${train_memory_mb}]"
 prep_payload="${run_dir}/control/prepare.sh"
 train_payload="${run_dir}/control/train.sh"
 
@@ -155,7 +163,9 @@ render() {
     echo "Entrypoint: ${target_entrypoint}"
     echo "Config: ${target_config}"
     echo "Model: ${model_id}"
+    echo "Tokenizer: ${tokenizer_id}"
     echo "Training shape: ${train_hosts} hosts x 8 GPUs = $((train_hosts * 8)) GPUs"
+    echo "Smoke mode: ${nanov3_interactive_smoke}"
     echo "Preparation resources: -q ${lsf_queue} -G ${lsf_group} -n ${prep_slots} -M ${prep_memory_mb} -W ${prep_walltime} -R ${prep_resource}"
     echo "Training resources: -q ${lsf_queue} -G ${lsf_group} -n ${train_slots} -M ${train_memory_mb} -W ${train_walltime} -R ${train_resource} -gpu ${gpu_requirement}"
     echo "Training dependency: ${dependency}"
@@ -225,8 +235,11 @@ chmod 700 \
     write_export TARGET_ENTRYPOINT "$target_entrypoint"
     write_export TARGET_CONFIG "$target_config"
     write_export MODEL_ID "$model_id"
+    write_export TOKENIZER_ID "$tokenizer_id"
     write_export TRAIN_EXPECTED_HOSTS "$train_hosts"
+    write_export TRAIN_SLOTS_PER_HOST "$train_slots_per_host"
     write_export RAY_EXPECTED_HOSTS "$train_hosts"
+    write_export NANOV3_INTERACTIVE_SMOKE "$nanov3_interactive_smoke"
 } >"$run_dir/control/run.env"
 chmod 600 "$run_dir/control/run.env"
 sha256sum \
@@ -244,7 +257,9 @@ sha256sum \
     printf 'target_entrypoint=%s\n' "$target_entrypoint"
     printf 'target_config=%s\n' "$target_config"
     printf 'model_id=%s\n' "$model_id"
-    printf 'training_shape=32 hosts x 8 GPUs\n'
+    printf 'tokenizer_id=%s\n' "$tokenizer_id"
+    printf 'training_shape=%s hosts x 8 GPUs\n' "$train_hosts"
+    printf 'smoke_mode=%s\n' "$nanov3_interactive_smoke"
     printf 'queue=%s\n' "$lsf_queue"
     printf 'group=%s\n' "$lsf_group"
     printf 'expected_prep_marker=%s/status/PREP_SUCCESS\n' "$run_dir"

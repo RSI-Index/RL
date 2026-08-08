@@ -221,7 +221,7 @@ ray stop --force >/dev/null 2>&1 || true
 
 common_args=(
     --disable-usage-stats
-    --num-cpus=8
+    --num-cpus=17
     --num-gpus=8
     --resources "{\"topo_rank\": ${topo_rank}}"
     --min-worker-port=2000

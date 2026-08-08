@@ -222,6 +222,26 @@ model_snapshot=$(find "$model_cache_root" -mindepth 2 -maxdepth 2 \
 printf 'model=%s\nsnapshot=%s\n' "$MODEL_ID" "$model_snapshot" \
     >"$run_dir/status/model.ready"
 
+"${container[@]}" hf download "$TOKENIZER_ID" \
+    tokenizer.json tokenizer_config.json special_tokens_map.json chat_template.jinja
+tokenizer_cache_root="$CACHE_ROOT/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/snapshots"
+tokenizer_snapshot=$(find "$tokenizer_cache_root" -mindepth 2 -maxdepth 2 \
+    -name tokenizer_config.json -printf '%h\n' | sort | tail -n 1)
+[[ -n $tokenizer_snapshot && -s $tokenizer_snapshot/tokenizer_config.json ]] || {
+    echo "Nano v3 tokenizer snapshot validation failed: ${tokenizer_snapshot}" >&2
+    exit 2
+}
+"${container[@]}" python - "$tokenizer_snapshot/tokenizer_config.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as config_file:
+    config = json.load(config_file)
+assert config.get("chat_template"), "Nano v3 tokenizer is missing chat_template"
+PY
+printf 'tokenizer=%s\nsnapshot=%s\n' "$TOKENIZER_ID" "$tokenizer_snapshot" \
+    >"$run_dir/status/tokenizer.ready"
+
 if [[ ! -s $data_marker ]]; then
     "${container[@]}" hf download "$dataset_id" \
         --repo-type dataset --local-dir "$raw_data_dir"
