@@ -402,9 +402,17 @@ run_id=$5
 checkpoint_dir=$6
 expected_host_count=$7
 checkpoint_save_period=${8:-}
+checkpoint_must_save_by=${9:-}
 checkpoint_overrides=()
 if [[ -n $checkpoint_save_period ]]; then
     checkpoint_overrides+=("checkpointing.save_period=$checkpoint_save_period")
+fi
+if [[ -n $checkpoint_must_save_by ]]; then
+    [[ $checkpoint_must_save_by =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || {
+        echo "invalid checkpoint deadline: $checkpoint_must_save_by" >&2
+        exit 2
+    }
+    checkpoint_overrides+=("checkpointing.checkpoint_must_save_by=$checkpoint_must_save_by")
 fi
 cd /opt/nemo-rl
 uv run examples/nemo_gym/run_grpo_nemo_gym.py \
@@ -424,6 +432,7 @@ uv run examples/nemo_gym/run_grpo_nemo_gym.py \
     "${checkpoint_overrides[@]}"
 ' -- "$MODEL_ID" "$tokenizer_id" "$prepared_data_dir" "$run_dir" "$RUN_ID" "$CHECKPOINT_DIR" \
     "$expected_host_count" "${CHECKPOINT_SAVE_PERIOD:-}" \
+    "${CHECKPOINT_MUST_SAVE_BY:-}" \
     2>&1 | tee "$driver_log"
 driver_status=${PIPESTATUS[0]}
 set -e

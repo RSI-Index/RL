@@ -47,7 +47,8 @@ ready_marker="$run_dir/status/ray/node-${rank}.ready"
 failure_marker="$run_dir/status/ray/node-${rank}.failed"
 stop_marker="$run_dir/status/RAY_STOP"
 vllm_actor="nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
-vllm_venv_dir="$CACHE_ROOT/ray_venvs/$SOURCE_COMMIT/$vllm_actor"
+vllm_venv_commit=${VLLM_VENV_COMMIT:-$SOURCE_COMMIT}
+vllm_venv_dir="$CACHE_ROOT/ray_venvs/$vllm_venv_commit/$vllm_actor"
 
 case "$node_tmp" in
     /tmp/nrl-nanov3-ray-[0-9]*-[0-9]*) ;;
