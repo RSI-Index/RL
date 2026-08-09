@@ -427,6 +427,8 @@ uv run examples/nemo_gym/run_grpo_nemo_gym.py \
     logger.wandb_enabled=true \
     logger.wandb.project=nemo-rl \
     "logger.wandb.name=$run_id" \
+    logger.wandb.log_nemo_gym_full_result_tables=false \
+    grpo.val_period=0 \
     logger.tensorboard_enabled=true \
     "checkpointing.checkpoint_dir=$checkpoint_dir" \
     "${checkpoint_overrides[@]}"
