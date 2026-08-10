@@ -1,0 +1,43 @@
+# Nemotron 3 Super RLVR — current NeMo-RL-compatible 21-node test variant.
+defaults: "../stage1_rlvr_109node.yaml"
+
+checkpointing:
+  checkpoint_dir: "results/super_v3_prod_stage1_rlvr_21node"
+
+grpo:
+  num_prompts_per_step: 128
+  num_generations_per_prompt: 8
+
+policy:
+  train_global_batch_size: 1024
+  megatron_cfg:
+    expert_model_parallel_size: 16
+  generation:
+    vllm_cfg:
+      tensor_parallel_size: 8
+    vllm_kwargs:
+      max_num_seqs: 16
+    colocated:
+      resources:
+        num_nodes: 8
+
+env:
+  nemo_gym:
+    genrm_model:
+      responses_api_models:
+        genrm_model:
+          vllm_serve_kwargs:
+            max_num_seqs: 16
+    nl2bash_judge_model:
+      responses_api_models:
+        local_vllm_model:
+          vllm_serve_kwargs:
+            max_num_seqs: 16
+    safety_judge_model:
+      responses_api_models:
+        local_vllm_model:
+          vllm_serve_kwargs:
+            max_num_seqs: 16
+
+cluster:
+  num_nodes: 21

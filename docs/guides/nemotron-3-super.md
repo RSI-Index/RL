@@ -112,6 +112,13 @@ Each stage is launched with `super_launch.sh`. Set the following variables befor
 
 The launch examples below use the H100 prod configs. For stages with GPU judge servers, set `SBATCH_NUM_NODES` to the total node count so SLURM allocates both the NeMo-RL nodes and the extra NeMo-Gym nodes. Lower-DP H100 variants are available under `examples/nemo_gym/nemotron-3-super/small_scale/`.
 
+The repository also includes current-recipe-compatible variants aligned with the latest Nemotron Super RLVR recipe:
+
+* `examples/nemo_gym/nemotron-3-super/stage1_rlvr_109node.yaml` — full-scale 109-node variant.
+* `examples/nemo_gym/nemotron-3-super/small_scale/stage1_rlvr_21node.yaml` — reduced 21-node test variant.
+
+These variants keep the local `super_launch.sh` interface, so `MODEL_PATH`, `TRAIN_PATH`, and `VAL_PATH` are still supplied at launch time. The original `stage1_rlvr.yaml` remains the 183-node configuration.
+
 ### Stage 1 - RLVR
 
 #### Stage 1.1 - RLVR 1 (183 H100 GPU nodes)

@@ -1,0 +1,62 @@
+# Nemotron 3 Super RLVR — current NeMo-RL-compatible 109-node variant.
+#
+# This keeps the local super_launch.sh / MODEL_PATH / TRAIN_PATH interface while
+# carrying over the full-scale settings from the latest Nemotron recipe. The
+# Nemotron recipe's `run:` artifact block is intentionally not copied here;
+# this launcher supplies the model and data paths at runtime.
+defaults: "stage1_rlvr.yaml"
+
+checkpointing:
+  checkpoint_must_save_by: "00:03:30:00"
+  save_optimizer: false
+
+grpo:
+  # These options are present in the latest Nemotron RLVR recipe and are
+  # disabled by default, but keeping them explicit makes the merge visible.
+  use_best_at_k: false
+  best_at_k_k: 8
+  best_at_k_m: 1000
+  use_combined_training: false
+  combined_training_weight_mode: "auto"
+  combined_training_best_at_k_weight: 0.2
+  combined_training_pass_at_1_weight: 1.0
+  dynamic_sampling_oversample_ratio: 1.0
+
+policy:
+  megatron_cfg:
+    expert_model_parallel_size: 8
+    mtp_loss_scaling_factor: 0.0
+    mtp_num_layers: 0
+    track_moe_metrics: true
+    do_not_average_loss: true
+    cp_normalize: true
+    calculate_per_token_loss: true
+    scale_loss_by_dp_cp_size: false
+    distributed_data_parallel_config:
+      average_in_collective: false
+
+  # The latest recipe uses TP as the sequence-packing divisibility unit.
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+
+  generation:
+    vllm_cfg:
+      tensor_parallel_size: 4
+    colocated:
+      resources:
+        gpus_per_node: 8
+        num_nodes: 72
+
+env:
+  use_genrm_compare: true
+  genrm_agent_names:
+    - "genrm_simple_agent"
+    - "genrm_simple_agent_reasoning_off"
+  genrm_compare_server_name: "genrm_compare"
+  nemo_gym:
+    num_gpu_nodes: 5
+    port_range_low: 15001
+    port_range_high: 20000
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 109
