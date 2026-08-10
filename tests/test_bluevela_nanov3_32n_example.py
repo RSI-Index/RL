@@ -38,9 +38,10 @@ def test_dry_run_renders_32_node_contract_without_writing(tmp_path: Path) -> Non
     assert "-q priority" in rendered
     assert "-G grp_models" in rendered
     assert "-n 64" in rendered
-    assert "-n 544" in rendered
-    assert "span[ptile=17]" in rendered
+    assert "-n 2048" in rendered
+    assert "span[ptile=64]" in rendered
     assert "num=8:mode=shared:j_exclusive=yes" in rendered
+    assert "-gpu num=8:mode=shared:j_exclusive=yes -x" in rendered
     assert "32 hosts x 8 GPUs" in rendered
     assert "Preparation reuse: automatic after exact-commit artifact validation" in rendered
     assert "done(PREP_JOB_ID)" in rendered
@@ -71,7 +72,7 @@ def test_dry_run_renders_two_node_batch_contract_without_training_overrides(
     )
 
     rendered = result.stdout
-    assert "-n 34" in rendered
+    assert "-n 128" in rendered
     assert "2 hosts x 8 GPUs = 16 GPUs" in rendered
     assert "-W 02:00" in rendered
     assert "Smoke mode" not in rendered
@@ -162,6 +163,7 @@ def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     assert "train_exclude_hosts=${TRAIN_EXCLUDE_HOSTS:-}" in submit
     assert "train_select_terms+=(\"hname!='${excluded_host}'\")" in submit
     assert 'train_resource="select[${train_select}] ${train_resource}"' in submit
+    assert '    -x\n)' in submit
 
     assert "ray start --head" in ray_node
     assert "ray start --address" in ray_node
@@ -325,7 +327,7 @@ def test_train_driver_shares_host_pid_namespace_with_ray_head(
         "APPTAINER_ARGS_LOG": str(apptainer_log),
         "UV_ARGS_LOG": str(uv_log),
         "LSB_JOBID": job_id,
-        "LSB_MCPU_HOSTS": f"{socket.gethostname().split('.')[0]} 8 worker 8",
+        "LSB_MCPU_HOSTS": f"{socket.gethostname().split('.')[0]} 64 worker 64",
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
     }
     try:
@@ -451,4 +453,4 @@ def test_ray_node_advertises_cpus_for_colocated_policy_and_generation(
     )
 
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    assert "--num-cpus=17" in ray_log.read_text().splitlines()
+    assert "--num-cpus=64" in ray_log.read_text().splitlines()

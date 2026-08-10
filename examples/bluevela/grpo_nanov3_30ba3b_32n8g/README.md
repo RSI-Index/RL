@@ -47,10 +47,12 @@ checkout, `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16`, and
 uses the final 1,000 rows for validation, builds a commit-scoped vLLM 0.25.1
 Ray-worker environment, and prefetches the NeMo-Gym environments.
 
-Training requests queue `priority`, group `grp_models`, 544 slots spread 17
-per host, 512 GiB per host, and `num=8:mode=shared:j_exclusive=yes`. The
-training payload validates exactly 32 allocated hosts and eight H100s on every
-host before starting one Ray head plus 31 workers through `blaunch`.
+Training requests queue `priority`, group `grp_models`, 2,048 slots spread 64
+per host, 512 GiB per host, `num=8:mode=shared:j_exclusive=yes`, and LSF `-x`.
+The GPU requirement prevents cross-job GPU sharing, while `-x` reserves every
+allocated host exclusively so CPU-only jobs cannot be colocated with training.
+The training payload validates exactly 32 allocated hosts and eight H100s on
+every host before starting one Ray head plus 31 workers through `blaunch`.
 
 The submitter prints the run directory and both LSF job IDs. Monitor with:
 

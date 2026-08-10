@@ -253,7 +253,7 @@ prep_memory_mb=${PREP_MEMORY_MB:-524288}
 prep_walltime=${PREP_WALLTIME:-06:00}
 prep_tmp_mb=${PREP_TMP_MB:-153600}
 train_hosts=${TRAIN_HOSTS:-32}
-train_slots_per_host=17
+train_slots_per_host=64
 train_slots=${TRAIN_SLOTS:-$((train_hosts * train_slots_per_host))}
 train_memory_mb=${TRAIN_MEMORY_MB:-524288}
 train_walltime=${TRAIN_WALLTIME:-04:00}
@@ -320,7 +320,7 @@ render() {
     echo "Training excluded hosts: ${train_exclude_hosts:-none}"
     echo "Preparation reuse: automatic after exact-commit artifact validation"
     echo "Preparation resources: -q ${lsf_queue} -G ${lsf_group} -n ${prep_slots} -M ${prep_memory_mb} -W ${prep_walltime} -R ${prep_resource}"
-    echo "Training resources: -q ${lsf_queue} -G ${lsf_group} -n ${train_slots} -M ${train_memory_mb} -W ${train_walltime} -R ${train_resource} -gpu ${gpu_requirement}"
+    echo "Training resources: -q ${lsf_queue} -G ${lsf_group} -n ${train_slots} -M ${train_memory_mb} -W ${train_walltime} -R ${train_resource} -gpu ${gpu_requirement} -x"
     echo "Training dependency: ${dependency}"
     echo "Preparation submission:"
     print_command bsub \
@@ -333,7 +333,7 @@ render() {
     print_command bsub \
         -q "$lsf_queue" -G "$lsf_group" -n "$train_slots" \
         -M "$train_memory_mb" -W "$train_walltime" -R "$train_resource" \
-        -gpu "$gpu_requirement" -w "$dependency" -J "$train_job_name" \
+        -gpu "$gpu_requirement" -x -w "$dependency" -J "$train_job_name" \
         -o "${run_dir}/logs/train.%J.out" -e "${run_dir}/logs/train.%J.err" \
         /bin/bash "$train_payload" "$run_dir"
 }
@@ -446,6 +446,9 @@ train_submission=(
     -q "$lsf_queue" -G "$lsf_group" -n "$train_slots"
     -M "$train_memory_mb" -W "$train_walltime" -R "$train_resource"
     -gpu "$gpu_requirement"
+    # Keep every allocated training host exclusive to this job. GPU-level
+    # j_exclusive alone still permits CPU-only jobs to share the hosts.
+    -x
 )
 if [[ $dependency != none ]]; then
     train_submission+=(-w "$dependency")
