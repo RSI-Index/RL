@@ -23,8 +23,11 @@ readonly failure_marker="$run_dir/status/PREP_FAILED"
 readonly vllm_actor="nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
 readonly vllm_venv_dir="$CACHE_ROOT/ray_venvs/$SOURCE_COMMIT/$vllm_actor"
 readonly vllm_venv_marker="$vllm_venv_dir/VENV_SUCCESS"
-readonly vllm_archive="$ARCHIVE_ROOT/ray_venvs/$SOURCE_COMMIT/${vllm_actor}.tar"
+readonly vllm_archive_tag="vllm-0.25.1-nccl-2.28.9"
+readonly vllm_archive="$ARCHIVE_ROOT/ray_venvs/$SOURCE_COMMIT/${vllm_actor}.${vllm_archive_tag}.tar"
 readonly vllm_archive_marker="${vllm_archive}.success"
+readonly vllm_legacy_archive="$ARCHIVE_ROOT/ray_venvs/$SOURCE_COMMIT/${vllm_actor}.tar"
+readonly vllm_legacy_archive_marker="${vllm_legacy_archive}.success"
 readonly gym_archive="$ARCHIVE_ROOT/huggingface/gym_venvs.tar"
 readonly gym_marker="${gym_archive}.success"
 job_id=${LSB_JOBID:-$$}
@@ -137,8 +140,12 @@ if [[ ! -s $vllm_archive_marker ]]; then
     vllm_archive_build="${vllm_archive}.build.${job_id}"
     [[ ! -e $vllm_archive ]] || { echo "vLLM archive exists without marker: $vllm_archive" >&2; exit 2; }
     [[ ! -e $vllm_archive_build ]] || { echo "stale vLLM archive build exists: $vllm_archive_build" >&2; exit 2; }
-    if [[ -s $vllm_venv_marker && -L $vllm_venv_dir/bin/python ]]; then
-        tar -C "$vllm_venv_dir" -cf "$vllm_archive_build" .
+    if [[ -s $vllm_legacy_archive && -s $vllm_legacy_archive_marker ]]; then
+        mkdir -p "$vllm_local_build"
+        tar -C "$vllm_local_build" -xf "$vllm_legacy_archive"
+    elif [[ -s $vllm_venv_marker && -L $vllm_venv_dir/bin/python ]]; then
+        mkdir -p "$vllm_local_build"
+        cp -a --reflink=never "$vllm_venv_dir/." "$vllm_local_build/"
     else
         "${container[@]}" /bin/bash -ce '
 unset UV_NO_SYNC UV_PROJECT_ENVIRONMENT VIRTUAL_ENV
@@ -161,13 +168,25 @@ assert importlib.metadata.version("ray") == sys.argv[1]
 assert importlib.metadata.version("torch") == sys.argv[2]
 PY
 ' -- "$vllm_actor"
-        [[ -L $vllm_local_build/bin/python ]] || { echo "local vLLM build is incomplete" >&2; exit 2; }
-        printf 'prepared_at_utc=%s\nsource_commit=%s\nvllm_version=0.25.1\n' \
-            "$(date -u +%FT%TZ)" "$SOURCE_COMMIT" >"$vllm_local_build/VENV_SUCCESS"
-        tar -C "$vllm_local_build" -cf "$vllm_archive_build" .
     fi
+    [[ -L $vllm_local_build/bin/python ]] || { echo "local vLLM build is incomplete" >&2; exit 2; }
+    "${container[@]}" /bin/bash -ce '
+unset UV_NO_SYNC UV_PROJECT_ENVIRONMENT VIRTUAL_ENV
+dst=/job-tmp/vllm-worker
+uv pip install --no-config --python "$dst/bin/python" --reinstall "nvidia-nccl-cu13==2.28.9"
+"$dst/bin/python" - <<"PY"
+import importlib.metadata
+
+assert importlib.metadata.version("nvidia-nccl-cu13") == "2.28.9"
+assert importlib.metadata.version("nccl4py") == "0.2.0"
+assert importlib.metadata.version("vllm") == "0.25.1"
+PY
+'
+    printf 'prepared_at_utc=%s\nsource_commit=%s\nvllm_version=0.25.1\nnccl_version=2.28.9\n' \
+        "$(date -u +%FT%TZ)" "$SOURCE_COMMIT" >"$vllm_local_build/VENV_SUCCESS"
+    tar -C "$vllm_local_build" -cf "$vllm_archive_build" .
     mv "$vllm_archive_build" "$vllm_archive"
-    printf 'prepared_at_utc=%s\nsource_commit=%s\nvllm_version=0.25.1\narchive=%s\n' \
+    printf 'prepared_at_utc=%s\nsource_commit=%s\nvllm_version=0.25.1\nnccl_version=2.28.9\narchive=%s\n' \
         "$(date -u +%FT%TZ)" "$SOURCE_COMMIT" "$vllm_archive" >"${vllm_archive_marker}.tmp"
     mv "${vllm_archive_marker}.tmp" "$vllm_archive_marker"
 fi

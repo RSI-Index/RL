@@ -21,7 +21,7 @@ repo_dir="$(cd -- "${script_dir}/../../.." && pwd)"
 readonly target_entrypoint="examples/nemo_gym/run_grpo_nemo_gym.py"
 readonly default_target_config="examples/nemo_gym/nemotron-3-super/small_scale/stage1_rlvr_convergence_27node_h100.yaml"
 readonly default_storage_root="/proj/datasets/interns/yuetai/agent_envs/more_task"
-readonly default_cache_root="/u/yuetai/more_task/cache/nemo-rl-super-27n"
+readonly default_cache_root="${default_storage_root}/cache/nemo-rl-super-27n"
 readonly default_archive_root="${default_storage_root}/cache/nemo-rl-super-27n-archives"
 
 usage() {
@@ -32,8 +32,8 @@ Required environment variables:
   MODEL_PATH, TRAIN_PATH, VAL_PATH
 
 Optional environment variables:
-  SOURCE_DIR, TARGET_CONFIG, CONTAINER_IMAGE, RUN_ROOT, CACHE_ROOT, ARCHIVE_ROOT,
-  RUN_DIR, CHECKPOINT_DIR, RUN_ID, LSF_QUEUE, TRAIN_EXCLUDE_HOSTS
+  SOURCE_DIR, TARGET_CONFIG, CONTAINER_IMAGE, RUN_ROOT, CACHE_ROOT, ARCHIVE_ROOT, JUDGE_HF_HOME,
+  RUN_DIR, CHECKPOINT_DIR, RUN_ID, LSF_QUEUE, TRAIN_EXCLUDE_HOSTS, TRAIN_MEMORY_MB, TRAIN_WALLTIME
 EOF
 }
 
@@ -61,8 +61,8 @@ require_proj_path() {
 
 require_cache_path() {
     local name=$1 value=$2
-    [[ $value == /proj/datasets/interns/yuetai/* || $value == /u/yuetai/* ]] \
-        || die "${name} must be under /proj/datasets/interns/yuetai or /u/yuetai: ${value}"
+    [[ $value == /proj/datasets/interns/yuetai/* ]] \
+        || die "${name} must be under /proj/datasets/interns/yuetai: ${value}"
 }
 
 validate_secret_file() {
@@ -99,6 +99,7 @@ target_config=${TARGET_CONFIG:-$default_target_config}
 run_root=${RUN_ROOT:-${default_storage_root}/runs}
 cache_root=${CACHE_ROOT:-$default_cache_root}
 archive_root=${ARCHIVE_ROOT:-$default_archive_root}
+judge_hf_home=${JUDGE_HF_HOME:-${default_storage_root}/cache/nemo-rl-super-27n-judge-hf}
 container_image=${CONTAINER_IMAGE:-${default_storage_root}/images/nemo-rl-v0.7.0.sif}
 apptainer=${APPTAINER:-/proj/datasets/interns/yuetai/rsi-nemotron/apptainer-env/bin/apptainer}
 run_id=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-grpo-super-27n8g-yuetai}
@@ -116,8 +117,8 @@ prep_tmp_mb=153600
 train_hosts=27
 train_slots_per_host=17
 train_slots=$((train_hosts * train_slots_per_host))
-train_memory_mb=524288
-train_walltime=${TRAIN_WALLTIME:-04:00}
+train_memory_mb=${TRAIN_MEMORY_MB:-1048576}
+train_walltime=${TRAIN_WALLTIME:-24:00}
 gpu_requirement=${GPU_REQUIREMENT:-num=8:mode=shared:j_exclusive=yes}
 train_exclude_hosts=${TRAIN_EXCLUDE_HOSTS:-}
 
@@ -126,6 +127,10 @@ validate_identifier RUN_ID "$run_id"
 [[ $lsf_group == grp_models ]] || die "LSF_GROUP must remain grp_models"
 [[ $gpu_requirement == num=8:mode=shared:j_exclusive=yes ]] \
     || die "GPU_REQUIREMENT must reserve eight job-exclusive H100 GPUs"
+[[ $train_memory_mb =~ ^[0-9]+$ ]] \
+    || die "TRAIN_MEMORY_MB must be an integer number of MiB: ${train_memory_mb}"
+(( train_memory_mb >= 1048576 )) \
+    || die "TRAIN_MEMORY_MB must be at least 1048576 MiB for async Super 120B training"
 [[ -d $source_dir/.git ]] || die "SOURCE_DIR is not a Git checkout: ${source_dir}"
 [[ -f $source_dir/$target_entrypoint ]] || die "entrypoint is missing: ${source_dir}/${target_entrypoint}"
 [[ -f $source_dir/$target_config ]] || die "config is missing: ${source_dir}/${target_config}"
@@ -183,6 +188,7 @@ require_proj_path RUN_ROOT "$run_root"
 require_proj_path RUN_DIR "$run_dir"
 require_cache_path CACHE_ROOT "$cache_root"
 require_proj_path ARCHIVE_ROOT "$archive_root"
+require_proj_path JUDGE_HF_HOME "$judge_hf_home"
 require_proj_path CHECKPOINT_DIR "$checkpoint_dir"
 require_proj_path MODEL_PATH "$model_path"
 require_proj_path TRAIN_PATH "$train_path"
@@ -201,7 +207,7 @@ validate_secret_file HF_TOKEN_FILE "$hf_token_file"
 
 mkdir -p "$run_dir/control" "$run_dir/logs/ray" "$run_dir/status/ray" \
     "$run_dir/tmp" "$run_dir/home" "$run_dir/wandb" "$run_dir/nemo_rl_logs" \
-    "$run_dir/status" "$checkpoint_dir" "$cache_root" "$archive_root"
+    "$run_dir/status" "$checkpoint_dir" "$cache_root" "$archive_root" "$judge_hf_home"
 cp "$script_dir/prepare.sh" "$script_dir/train.sh" "$script_dir/ray_node.sh" \
     "$run_dir/control/"
 chmod 700 "$run_dir/control/prepare.sh" "$run_dir/control/train.sh" "$run_dir/control/ray_node.sh"
@@ -223,6 +229,7 @@ git -C "$source_dir" diff --quiet && git -C "$source_dir" diff --cached --quiet 
     write_export CHECKPOINT_DIR "$checkpoint_dir"
     write_export CACHE_ROOT "$cache_root"
     write_export ARCHIVE_ROOT "$archive_root"
+    write_export JUDGE_HF_HOME "$judge_hf_home"
     write_export CONTAINER_IMAGE "$container_image"
     write_export APPTAINER "$apptainer"
     write_export WANDB_API_KEY_FILE "$wandb_key_file"
@@ -239,6 +246,7 @@ sha256sum "$run_dir/control/prepare.sh" "$run_dir/control/train.sh" "$run_dir/co
     printf 'source_dir=%s\nsource_commit=%s\nsource_dirty=%s\n' "$source_dir" "$source_commit" "$source_dirty"
     printf 'config=%s\nmodel=%s\ntrain_data=%s\nvalidation_data=%s\n' "$target_config" "$model_path" "$train_path" "$val_path"
     printf 'container_image=%s\nqueue=%s\ngroup=%s\nray_hosts=%s\n' "$container_image" "$lsf_queue" "$lsf_group" "$train_hosts"
+    printf 'train_memory_mb=%s\ntrain_walltime=%s\n' "$train_memory_mb" "$train_walltime"
 } >"$run_dir/RUN_INFO.txt"
 
 if [[ $mode == --setup-only ]]; then

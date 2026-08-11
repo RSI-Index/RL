@@ -16,9 +16,12 @@ The allocation is 27 H100 hosts with eight GPUs per host:
 7 additional hosts = NeMo-Gym/judge capacity
 ```
 
-CPU and memory are intentionally aligned with the previous Nano Blue Vela
-launcher baseline: 17 LSF slots and 512 GiB per training host. GPU allocation
-is job-exclusive; this interactive debug request does not use `-x`.
+The launcher requests 17 LSF slots and 1 TiB per host by default. Super 120B
+async training overlaps the driver training batch with replay-buffer rollout
+payloads and has exceeded a 512 GiB LSF memory limit in practice. Values below
+1 TiB are rejected; a larger value can be selected with `TRAIN_MEMORY_MB`.
+The default walltime is 24 hours and can be changed with `TRAIN_WALLTIME`. GPU
+allocation is job-exclusive; this interactive debug request does not use `-x`.
 
 The Super model, train data, and validation data are supplied explicitly. The
 launcher runs the current checkout so uncommitted local recipe changes are not

@@ -23,7 +23,8 @@ source "$run_dir/control/run.env"
 
 readonly expected_host_count=27
 readonly vllm_actor="nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
-readonly vllm_archive="$ARCHIVE_ROOT/ray_venvs/$SOURCE_COMMIT/${vllm_actor}.tar"
+readonly vllm_archive_tag="vllm-0.25.1-nccl-2.28.9"
+readonly vllm_archive="$ARCHIVE_ROOT/ray_venvs/$SOURCE_COMMIT/${vllm_actor}.${vllm_archive_tag}.tar"
 readonly vllm_archive_marker="${vllm_archive}.success"
 readonly gym_archive="$ARCHIVE_ROOT/huggingface/gym_venvs.tar"
 readonly gym_archive_marker="${gym_archive}.success"
@@ -58,6 +59,7 @@ mkdir -p "$node_tmp/ray" "$node_tmp/torch" "$node_tmp/triton" \
     "$node_tmp/vllm_compile_cache/deep_gemm" "$node_tmp/flashinfer_cubins" \
     "$node_tmp/flashinfer_workspace" "$run_dir/status/ray" \
     "$CACHE_ROOT/megatron_ckpt_cache" "$CACHE_ROOT/hf_config_locks"
+mkdir -p "$JUDGE_HF_HOME/xet"
 
 [[ -s $CONTAINER_IMAGE ]] || { echo "container image is missing" >&2; exit 2; }
 [[ -s $vllm_archive && -s $vllm_archive_marker ]] || {
@@ -82,8 +84,34 @@ for gpu_name in "${gpu_names[@]}"; do
     [[ $gpu_name == *H100* ]] || { echo "expected H100, found $gpu_name" >&2; exit 2; }
 done
 
+head_ip=${head_address%:*}
+if [[ $role == head ]]; then
+    node_ip=$head_ip
+else
+    read -r node_interface node_ip < <(
+        ip -4 route get "$head_ip" | awk '
+            { for (i = 1; i <= NF; i++) {
+                if ($i == "dev") dev = $(i + 1)
+                if ($i == "src") src = $(i + 1)
+            } }
+            END { print dev, src }
+        '
+    )
+fi
+node_interface=${node_interface:-$(
+    ip -4 -o addr show scope global | awk -v expected_ip="$node_ip" '
+        { ip = $4; sub(/\/.*/, "", ip) }
+        ip == expected_ip { sub(/@.*/, "", $2); print $2; exit }
+    '
+)}
+[[ -n $node_ip && -n $node_interface ]] || {
+    echo "unable to resolve the Ray/NCCL network path to $head_ip" >&2
+    exit 2
+}
+echo "Ray/NCCL network: node_ip=$node_ip interface=$node_interface head_ip=$head_ip"
+
 export APPTAINERENV_NCCL_IB_HCA='^=mlx5_1,mlx5_6'
-export APPTAINERENV_NCCL_SOCKET_IFNAME='=ibp26s0,ibp60s0,ibp77s0,ibp94s0,ibp156s0,ibp188s0,ibp204s0,ibp220s0'
+export APPTAINERENV_NCCL_SOCKET_IFNAME="=${node_interface}"
 export APPTAINERENV_NCCL_DEBUG=INFO
 export APPTAINERENV_NCCL_DEBUG_SUBSYS=INIT,NET
 
@@ -104,7 +132,8 @@ container=(
     --bind /dev/infiniband:/dev/infiniband
     --bind /etc/resolv.conf:/etc/resolv.conf:ro
     --pwd /opt/nemo-rl
-    --env "HF_HOME=$CACHE_ROOT/huggingface"
+    --env "HF_HOME=$JUDGE_HF_HOME"
+    --env "HF_XET_CACHE=$JUDGE_HF_HOME/xet"
     --env HF_MODULES_CACHE=/job-tmp/hf_modules
     --env XDG_CACHE_HOME=/job-tmp/xdg
     --env UV_CACHE_DIR=/job-tmp/uv
@@ -162,7 +191,8 @@ if [[ $1 == head ]]; then
 else
   started=0
   for attempt in $(seq 1 30); do
-    if ray start --address="$2" --node-manager-port=1301 --object-manager-port=1303 \
+    if ray start --address="$2" --node-ip-address="$6" \
+      --node-manager-port=1301 --object-manager-port=1303 \
       --dashboard-agent-grpc-port=1307 --dashboard-agent-listen-port=1311 \
       --metrics-export-port=1309 "${common_args[@]}"; then
       started=1
@@ -180,5 +210,11 @@ while [[ ! -f $5 ]]; do
   sleep 10
   ray status --address="$2" >/dev/null
 done
+if [[ -d /job-tmp/ray/session_latest/logs ]]; then
+  tar -C /job-tmp/ray/session_latest -czf \
+    "$7/logs/ray/raw-node-$3-$(hostname -s).tar.gz.tmp" logs
+  mv "$7/logs/ray/raw-node-$3-$(hostname -s).tar.gz.tmp" \
+    "$7/logs/ray/raw-node-$3-$(hostname -s).tar.gz"
+fi
 ray stop --force
-' -- "$role" "$head_address" "$rank" "$ready_marker" "$stop_marker"
+' -- "$role" "$head_address" "$rank" "$ready_marker" "$stop_marker" "$node_ip" "$run_dir"

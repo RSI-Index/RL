@@ -159,10 +159,17 @@ def _get_node_ip_and_free_port(
 
 
 def _get_node_ip_local() -> str:
-    # Get the IP address of the current node
-    node_ip = ray._private.services.get_node_ip_address()
+    # Use the address registered in Ray's node table. On multihomed nodes,
+    # both route detection and the worker-local cached address can select a
+    # different interface and advertise an unreachable rendezvous IP.
+    node_id = ray.get_runtime_context().get_node_id()
+    for node in ray.nodes():
+        if node.get("Alive") and node.get("NodeID") == node_id:
+            node_ip = node.get("NodeManagerAddress")
+            if isinstance(node_ip, str) and node_ip:
+                return node_ip
 
-    return node_ip
+    raise RuntimeError(f"Could not find live Ray node {node_id} in the node table")
 
 
 def _bind_socket_in_range(

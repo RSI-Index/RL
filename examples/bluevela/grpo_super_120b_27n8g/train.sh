@@ -28,7 +28,8 @@ readonly success_marker="$run_dir/status/SUCCESS"
 readonly failure_marker="$run_dir/status/TRAIN_FAILED"
 readonly stop_marker="$run_dir/status/RAY_STOP"
 readonly vllm_actor="nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
-readonly vllm_archive="$ARCHIVE_ROOT/ray_venvs/$SOURCE_COMMIT/${vllm_actor}.tar"
+readonly vllm_archive_tag="vllm-0.25.1-nccl-2.28.9"
+readonly vllm_archive="$ARCHIVE_ROOT/ray_venvs/$SOURCE_COMMIT/${vllm_actor}.${vllm_archive_tag}.tar"
 readonly vllm_archive_marker="${vllm_archive}.success"
 readonly gym_archive="$ARCHIVE_ROOT/huggingface/gym_venvs.tar"
 readonly gym_archive_marker="${gym_archive}.success"
@@ -55,6 +56,18 @@ cleanup() {
     done
     for pid in "${ray_launch_pids[@]}"; do
         kill "$pid" 2>/dev/null || true
+    done
+    deadline=$((SECONDS + 15))
+    while (( SECONDS < deadline )); do
+        running=0
+        for pid in "${ray_launch_pids[@]}"; do
+            kill -0 "$pid" 2>/dev/null && running=1 && break
+        done
+        (( running == 0 )) && break
+        sleep 1
+    done
+    for pid in "${ray_launch_pids[@]}"; do
+        kill -KILL "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
     printf 'finished_at_utc=%s\nexit_status=%s\n' "$(date -u +%FT%TZ)" "$status" \
@@ -71,7 +84,8 @@ trap cleanup EXIT
 rm -f "$success_marker" "$failure_marker" "$stop_marker"
 mkdir -p "$run_dir/logs/ray" "$run_dir/status/ray" "$run_dir/wandb" \
     "$run_dir/nemo_rl_logs" "$CHECKPOINT_DIR" "$CACHE_ROOT/megatron_ckpt_cache" \
-    "$CACHE_ROOT/hf_config_locks"
+    "$CACHE_ROOT/hf_config_locks" "$JUDGE_HF_HOME/xet"
+rm -f "$run_dir/status/ray"/node-*.ready "$run_dir/status/ray"/node-*.failed
 
 [[ -s "$run_dir/status/PREP_SUCCESS" ]] || { echo "PREP_SUCCESS is missing" >&2; exit 2; }
 [[ -s $CONTAINER_IMAGE ]] || { echo "container image is missing" >&2; exit 2; }
@@ -81,6 +95,7 @@ mkdir -p "$run_dir/logs/ray" "$run_dir/status/ray" "$run_dir/wandb" \
 }
 [[ -s $gym_archive && -s $gym_archive_marker ]] || { echo "Gym archive is incomplete" >&2; exit 2; }
 [[ -s $TRAIN_PATH && -s $VAL_PATH && -d $MODEL_PATH ]] || exit 2
+[[ -d $JUDGE_HF_HOME && -w $JUDGE_HF_HOME ]] || { echo "JUDGE_HF_HOME is not writable" >&2; exit 2; }
 command -v blaunch >/dev/null || { echo "blaunch is unavailable" >&2; exit 2; }
 [[ -n ${LSB_MCPU_HOSTS:-} ]] || { echo "LSB_MCPU_HOSTS is unset" >&2; exit 2; }
 
@@ -137,9 +152,18 @@ printf 'started_at_utc=%s\njob_id=%s\nhost=%s\n' \
 
 launch_ray_node() {
     local host=$1 role=$2 rank=$3
-    blaunch -z "$host" /bin/bash "$run_dir/control/ray_node.sh" \
-        "$run_dir" "$role" "$head_address" "$rank" \
-        >"$run_dir/logs/ray/node-${rank}-${host}.log" 2>&1 &
+    if [[ ${host%%.*} == "$(hostname -s)" ]]; then
+        /bin/bash "$run_dir/control/ray_node.sh" \
+            "$run_dir" "$role" "$head_address" "$rank" \
+            >"$run_dir/logs/ray/node-${rank}-${host}.log" 2>&1 &
+    elif [[ ${NRL_USE_BATTACH_LAUNCHER:-0} == 1 ]]; then
+        battach -L "$run_dir/control/attach_ray_node.sh" -m "$host" "$job_id" \
+            >"$run_dir/logs/ray/node-${rank}-${host}.log" 2>&1 &
+    else
+        blaunch -z "$host" /bin/bash "$run_dir/control/ray_node.sh" \
+            "$run_dir" "$role" "$head_address" "$rank" \
+            >"$run_dir/logs/ray/node-${rank}-${host}.log" 2>&1 &
+    fi
     ray_launch_pids+=("$!")
 }
 
@@ -188,7 +212,8 @@ container=(
     --bind /etc/resolv.conf:/etc/resolv.conf:ro
     --pwd /opt/nemo-rl
     --env "USER=$(id -un)"
-    --env "HF_HOME=$CACHE_ROOT/huggingface"
+    --env "HF_HOME=$JUDGE_HF_HOME"
+    --env "HF_XET_CACHE=$JUDGE_HF_HOME/xet"
     --env HF_MODULES_CACHE=/job-tmp/hf_modules
     --env XDG_CACHE_HOME=/job-tmp/xdg
     --env UV_CACHE_DIR=/job-tmp/uv
@@ -242,12 +267,15 @@ uv run examples/nemo_gym/run_grpo_nemo_gym.py \
   "data.train.data_path=$3" \
   "data.validation.data_path=$4" \
   env.nemo_gym.uv_venv_dir=/opt/gym_venvs \
+  "env.nemo_gym.safety_judge_model.responses_api_models.local_vllm_model.hf_home=$8" \
+  "env.nemo_gym.nl2bash_judge_model.responses_api_models.local_vllm_model.hf_home=$8" \
+  "env.nemo_gym.genrm_model.responses_api_models.genrm_model.hf_home=$8" \
   "checkpointing.checkpoint_dir=$5" \
   "logger.log_dir=$6/nemo_rl_logs" \
   logger.wandb_enabled=true \
   logger.wandb.project=nemo-rl \
   "logger.wandb.name=$7"
-' -- "$TARGET_CONFIG" "$MODEL_PATH" "$TRAIN_PATH" "$VAL_PATH" "$CHECKPOINT_DIR" "$run_dir" "$RUN_ID" \
+' -- "$TARGET_CONFIG" "$MODEL_PATH" "$TRAIN_PATH" "$VAL_PATH" "$CHECKPOINT_DIR" "$run_dir" "$RUN_ID" "$JUDGE_HF_HOME" \
     2>&1 | tee "$run_dir/logs/train-driver.log"
 driver_status=${PIPESTATUS[0]}
 printf 'driver_exit_status=%s\n' "$driver_status" >>"$run_dir/logs/train-status.log"

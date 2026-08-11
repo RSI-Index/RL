@@ -5,9 +5,10 @@
 ## 1. 目录与存储约定
 
 - 源码和小型配置放在：`/u/yuetai/more_task/envs`
-- 可参考的已验证环境在：`/u/yuetai/more_task/post_training/RL/examples/bluevela/grpo_nanov3_30ba3b_32n8g`
-- `more_task` 的大型数据、镜像、checkpoint 和运行输出建议统一放在：
+- 大型数据、镜像、checkpoint 和运行输出建议统一放在：
   `/proj/datasets/interns/yuetai/agent_envs/more_task`
+- 可参考的已验证环境在：`/u/yuetai/more_task/post_training/RL/examples/bluevela/grpo_nanov3_30ba3b_32n8g`
+
 
 HOME 空间只用于源码和小文件。模型、数据集、Hugging Face cache、SIF、日志和 checkpoint 必须放在 `/proj/datasets/interns/yuetai/...`。`/proj` 没有回收站，不要对共享根目录执行递归删除。
 
@@ -335,6 +336,7 @@ GPU 数为 `G`，GPU 总数为 `N * G`。下面只是 Nano v3 的 `N=32`、`G=8`
 | allocation | 节点数 | 每节点 CPU slot | 每节点内存 | 其他关键资源 |
 | --- | ---: | ---: | ---: | --- |
 | Nano v3 interactive | 32（来自 config） | 64 | 524288 MB（约 512 GiB） | 总计 2048 slot、每节点 8 张 GPU |
+| Super 120B async interactive | 27（20 training/generation + 7 judge） | 17 | 1048576 MB（1 TiB） | 总计 459 slot、每节点 8 张 GPU |
 
 对应的 Nano v3 interactive LSF 约束包含：
 
@@ -352,6 +354,11 @@ training 节点独占，避免 CPU-only job 与训练共享节点；
 `LSB_MCPU_HOSTS` 中的节点数和每节点 slot 数、每个节点是否有 8 张 H100，
 不满足时在训练开始前失败。这些数字来自 Nano v3 config；其他 config 必须
 用自己的 `N` 和 `G` 做同样校验。
+
+Super 120B 的 async pipeline 会让 driver 上的 4096-sample 训练 batch、Ray
+object store 和下一 weight version 的 replay-buffer payload 同时驻留。实测
+512 GiB LSF memory limit 会被超过，因此对应 launcher 默认并强制至少申请
+1048576 MB；不能继续照搬 Nano v3 的 524288 MB。
 
 提交前必须先执行 dry-run，确认最终渲染出的 `-n`、`-M`、`-R`、GPU 数和
 节点数，而不是只看队列里显示的 job name：

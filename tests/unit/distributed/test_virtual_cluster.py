@@ -40,6 +40,7 @@ from nemo_rl.distributed.virtual_cluster import (
     _get_free_consecutive_ports_local,
     _get_free_port_local,
     _get_node_ip_and_free_port,
+    _get_node_ip_local,
 )
 from nemo_rl.utils.venvs import create_local_venv
 from tests.unit.conftest import TEST_ASSETS_DIR
@@ -57,6 +58,48 @@ def test_get_node_ip_and_free_port_does_not_start_with_zero():
         ).remote()
     )
     assert not node_ip.startswith("0."), "Node IP should not start with 0.*.*.*"
+
+
+def test_get_node_ip_local_uses_ray_worker_address_on_multihomed_node():
+    """Use the address registered for the current node in Ray's node table."""
+    route_detected_ip = "100.126.8.36"
+    ray_node_ip = "100.126.12.36"
+    node_id = "current-node-id"
+    runtime_context = MagicMock()
+    runtime_context.get_node_id.return_value = node_id
+
+    with (
+        patch.object(
+            ray._private.services,
+            "get_node_ip_address",
+            return_value=route_detected_ip,
+        ) as get_node_ip_address,
+        patch.object(
+            ray._private.worker,
+            "global_worker",
+            MagicMock(node_ip_address=route_detected_ip),
+        ),
+        patch.object(ray, "get_runtime_context", return_value=runtime_context),
+        patch.object(
+            ray,
+            "nodes",
+            return_value=[
+                {
+                    "NodeID": "other-node-id",
+                    "NodeManagerAddress": "100.126.20.99",
+                    "Alive": True,
+                },
+                {
+                    "NodeID": node_id,
+                    "NodeManagerAddress": ray_node_ip,
+                    "Alive": True,
+                },
+            ],
+        ),
+    ):
+        assert _get_node_ip_local() == ray_node_ip
+
+    get_node_ip_address.assert_not_called()
 
 
 def test_env_max_retries_invalid_value():
