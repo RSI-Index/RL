@@ -12,7 +12,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_DIR = REPO_ROOT / "examples/bluevela/grpo_nanov3_30ba3b_32n8g"
 SUBMIT = EXAMPLE_DIR / "submit.sh"
-CONFIG = "examples/nemo_gym/grpo_nanov3.yaml"
+CONFIG = "examples/bluevela/grpo_nanov3_30ba3b_32n8g/config.yaml"
 ENTRYPOINT = "examples/nemo_gym/run_grpo_nemo_gym.py"
 TOKENIZER_ID = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 
@@ -47,6 +47,7 @@ def test_dry_run_renders_32_node_contract_without_writing(tmp_path: Path) -> Non
     assert "done(PREP_JOB_ID)" in rendered
     assert CONFIG in rendered
     assert ENTRYPOINT in rendered
+    assert "https://github.com/RSI-Index/RL.git" in rendered
     assert not run_dir.exists()
 
 
@@ -153,6 +154,9 @@ def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     assert "prefetch_venvs.py" in prepare
     assert 'prefetch_venvs.py "$1"' in prepare
     assert '"$TARGET_CONFIG"' in prepare
+    assert "nemo_gym_multinic_vllm.patch" in prepare
+    assert 'git -C "$gym_dir" apply' in prepare
+    assert (EXAMPLE_DIR / "nemo_gym_multinic_vllm.patch").is_file()
     assert "vllm-0.25.1-cp38-abi3-manylinux_2_28_x86_64.whl" in prepare
     assert "PREP_SUCCESS" in prepare
     assert "find_reusable_prep_run" in submit

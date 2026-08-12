@@ -19,7 +19,9 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "${script_dir}/../../.." && pwd)"
 
 readonly target_entrypoint="examples/nemo_gym/run_grpo_nemo_gym.py"
-readonly target_config="examples/nemo_gym/grpo_nanov3.yaml"
+readonly target_config="examples/bluevela/grpo_nanov3_30ba3b_32n8g/config.yaml"
+readonly gym_patch_rel="examples/bluevela/grpo_nanov3_30ba3b_32n8g/nemo_gym_multinic_vllm.patch"
+readonly gym_submodule_rel="3rdparty/Gym-workspace/Gym"
 readonly model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
 readonly tokenizer_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 readonly default_storage_root="/proj/datasets/interns/yuetai/agent_envs/more_task"
@@ -98,10 +100,10 @@ read_marker_value() {
 validate_reusable_prep_run() {
     local candidate=$1
     local marker="$candidate/status/PREP_SUCCESS"
-    local marker_source_commit marker_container marker_container_sha
+    local marker_source_commit marker_container marker_container_sha marker_gym_patch_sha
     local actual_container_sha model_snapshot tokenizer_snapshot
     local train_data validation_data gym_venv_dir vllm_worker_venv
-    local submodule_status
+    local submodule_status gym_patch gym_dir actual_gym_patch_sha
     local expected_train_data="$cache_root/huggingface/nanov3_data/prepared/train-split.jsonl"
     local expected_validation_data="$cache_root/huggingface/nanov3_data/prepared/val-split.jsonl"
     local expected_gym_venv_dir="$cache_root/huggingface/gym_venvs"
@@ -115,6 +117,7 @@ validate_reusable_prep_run() {
     marker_source_commit=$(read_marker_value "$marker" source_commit) || return 1
     marker_container=$(read_marker_value "$marker" container_image) || return 1
     marker_container_sha=$(read_marker_value "$marker" container_sha256) || return 1
+    marker_gym_patch_sha=$(read_marker_value "$marker" gym_patch_sha256) || return 1
     model_snapshot=$(read_marker_value "$marker" model_snapshot) || return 1
     train_data=$(read_marker_value "$marker" train_data) || return 1
     validation_data=$(read_marker_value "$marker" validation_data) || return 1
@@ -128,7 +131,15 @@ validate_reusable_prep_run() {
     [[ $marker_container_sha == "$actual_container_sha" ]] || return 1
     [[ $(git -C "$candidate/source" rev-parse HEAD 2>/dev/null) == "$source_commit" ]] \
         || return 1
-    git -C "$candidate/source" diff --quiet || return 1
+    gym_patch="$candidate/source/$gym_patch_rel"
+    gym_dir="$candidate/source/$gym_submodule_rel"
+    [[ -f $gym_patch && -d $gym_dir ]] || return 1
+    actual_gym_patch_sha=$(sha256sum "$gym_patch" | awk '{ print $1 }')
+    [[ $marker_gym_patch_sha == "$actual_gym_patch_sha" ]] || return 1
+    git -C "$candidate/source" diff --quiet -- . ":(exclude)$gym_submodule_rel" \
+        || return 1
+    git -C "$gym_dir" diff -U0 -- responses_api_models/local_vllm_model/local_vllm_model_actor.py \
+        | cmp - "$gym_patch" || return 1
     git -C "$candidate/source" diff --cached --quiet || return 1
     submodule_status=$(git -C "$candidate/source" submodule status --recursive 2>/dev/null) \
         || return 1
@@ -237,7 +248,7 @@ run_root=${RUN_ROOT:-${default_storage_root}/runs}
 cache_root=${CACHE_ROOT:-${default_storage_root}/cache/nemo-rl-nanov3-32n}
 container_image=${CONTAINER_IMAGE:-${default_storage_root}/images/nemo-rl-v0.7.0.sif}
 apptainer=${APPTAINER:-/proj/datasets/interns/yuetai/rsi-nemotron/apptainer-env/bin/apptainer}
-source_repo=${SOURCE_REPO:-https://github.com/NVIDIA-NeMo/RL.git}
+source_repo=${SOURCE_REPO:-https://github.com/RSI-Index/RL.git}
 source_commit=${SOURCE_COMMIT:-$(git -C "$repo_dir" rev-parse HEAD)}
 run_id=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-grpo-nanov3-32n8g-yuetai}
 run_dir=${RUN_DIR:-${run_root}/nemo-rl-nanov3-32n/${run_id}}

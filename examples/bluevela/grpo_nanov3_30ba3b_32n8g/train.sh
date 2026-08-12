@@ -20,7 +20,7 @@ run_dir=${1:?usage: train.sh RUN_DIR}
 source "$run_dir/control/run.env"
 
 readonly expected_entrypoint="examples/nemo_gym/run_grpo_nemo_gym.py"
-readonly expected_config="examples/nemo_gym/grpo_nanov3.yaml"
+readonly expected_config="examples/bluevela/grpo_nanov3_30ba3b_32n8g/config.yaml"
 readonly expected_model="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
 readonly expected_tokenizer="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 tokenizer_id=${TOKENIZER_ID:-$expected_tokenizer}
@@ -416,7 +416,7 @@ if [[ -n $checkpoint_must_save_by ]]; then
 fi
 cd /opt/nemo-rl
 uv run examples/nemo_gym/run_grpo_nemo_gym.py \
-    --config examples/nemo_gym/grpo_nanov3.yaml \
+    --config examples/bluevela/grpo_nanov3_30ba3b_32n8g/config.yaml \
     "cluster.num_nodes=$expected_host_count" \
     "policy.model_name=$model_id" \
     "policy.tokenizer.name=$tokenizer_id" \

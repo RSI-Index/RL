@@ -30,6 +30,8 @@ readonly vllm_venv_marker="$vllm_venv_dir/VENV_SUCCESS"
 readonly raw_data_dir="$CACHE_ROOT/huggingface/nanov3_data/raw"
 readonly prepared_data_dir="$CACHE_ROOT/huggingface/nanov3_data/prepared"
 readonly data_marker="$prepared_data_dir/DATA_SUCCESS"
+readonly gym_patch_rel="examples/bluevela/grpo_nanov3_30ba3b_32n8g/nemo_gym_multinic_vllm.patch"
+readonly gym_submodule_rel="3rdparty/Gym-workspace/Gym"
 job_id=${LSB_JOBID:-$$}
 node_tmp="/tmp/nrl-nanov3-prep-${job_id}"
 
@@ -97,6 +99,20 @@ git -C "$source_dir" submodule update --init --recursive --depth 1
 if git -C "$source_dir" submodule status --recursive | grep -Eq '^[+-U]'; then
     echo "one or more submodules are missing or not pinned" >&2
     git -C "$source_dir" submodule status --recursive >&2
+    exit 2
+fi
+gym_patch="$source_dir/$gym_patch_rel"
+gym_dir="$source_dir/$gym_submodule_rel"
+[[ -f $gym_patch && -d $gym_dir ]] || {
+    echo "required NeMo-Gym multi-NIC patch or submodule is missing" >&2
+    exit 2
+}
+if git -C "$gym_dir" apply --unidiff-zero --reverse --check "$gym_patch"; then
+    echo "NeMo-Gym multi-NIC patch is already applied"
+elif git -C "$gym_dir" apply --unidiff-zero --check "$gym_patch"; then
+    git -C "$gym_dir" apply --unidiff-zero "$gym_patch"
+else
+    echo "NeMo-Gym multi-NIC patch does not apply cleanly" >&2
     exit 2
 fi
 [[ -f "$source_dir/$TARGET_ENTRYPOINT" ]] || {
@@ -349,7 +365,9 @@ python examples/nemo_gym/prefetch_venvs.py "$1"
 fi
 [[ -s $gym_marker ]]
 
-git -C "$source_dir" diff --quiet
+git -C "$source_dir" diff --quiet -- . ":(exclude)$gym_submodule_rel"
+git -C "$gym_dir" diff -U0 -- responses_api_models/local_vllm_model/local_vllm_model_actor.py \
+    | cmp - "$gym_patch"
 git -C "$source_dir" diff --cached --quiet
 
 {
@@ -358,6 +376,7 @@ git -C "$source_dir" diff --cached --quiet
     printf 'source_commit=%s\n' "$SOURCE_COMMIT"
     printf 'container_image=%s\n' "$CONTAINER_IMAGE"
     printf 'container_sha256=%s\n' "$(cut -d ' ' -f 1 "$run_dir/status/container.sha256")"
+    printf 'gym_patch_sha256=%s\n' "$(sha256sum "$gym_patch" | awk '{ print $1 }')"
     printf 'model_snapshot=%s\n' "$model_snapshot"
     printf 'train_data=%s\n' "$prepared_data_dir/train-split.jsonl"
     printf 'validation_data=%s\n' "$prepared_data_dir/val-split.jsonl"

@@ -6,8 +6,13 @@ files without changing their training hyperparameters:
 
 ```text
 examples/nemo_gym/run_grpo_nemo_gym.py
-examples/nemo_gym/grpo_nanov3.yaml
+examples/bluevela/grpo_nanov3_30ba3b_32n8g/config.yaml
 ```
+
+The directory also carries `nemo_gym_multinic_vllm.patch`. Preparation applies
+and verifies this pinned patch against the NeMo-Gym submodule so vLLM's Ray
+data-parallel workers use the same network interface that Ray advertises on
+multi-NIC Blue Vela hosts.
 
 The only Hydra overrides are operational: the prepared model and data paths,
 run-specific log/checkpoint paths, and W&B enablement/name.
@@ -17,6 +22,11 @@ The launcher defaults to a no-write dry run:
 ```bash
 bash examples/bluevela/grpo_nanov3_30ba3b_32n8g/submit.sh --dry-run
 ```
+
+By default, preparation fetches the exact local commit from
+`https://github.com/RSI-Index/RL.git`; therefore submit only commits that have
+already been pushed to that repository. `SOURCE_REPO` remains available for
+testing an explicitly chosen mirror.
 
 Review the rendered 32-host request carefully. Submit the run when ready:
 

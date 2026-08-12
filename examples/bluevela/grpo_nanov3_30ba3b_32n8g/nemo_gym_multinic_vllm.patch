@@ -1,0 +1,11 @@
+diff --git a/responses_api_models/local_vllm_model/local_vllm_model_actor.py b/responses_api_models/local_vllm_model/local_vllm_model_actor.py
+index 6fb1c8c..11a38ce 100644
+--- a/responses_api_models/local_vllm_model/local_vllm_model_actor.py
++++ b/responses_api_models/local_vllm_model/local_vllm_model_actor.py
+@@ -59 +59,5 @@ class LocalVLLMModelActor:
+-        # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
++        # vLLM's Ray DP backend derives its master address with get_ip() when
++        # data_parallel_address is unset.  That can select a different NIC from
++        # the one Ray advertises on multi-NIC hosts, making the DP master absent
++        # from Ray's node resources.  Pin both interfaces to Ray's node IP.
++        self.server_args.data_parallel_address = node_ip
