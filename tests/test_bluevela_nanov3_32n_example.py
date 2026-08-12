@@ -168,6 +168,10 @@ def test_payloads_cover_model_data_gym_ray_and_markers() -> None:
     assert "train_select_terms+=(\"hname!='${excluded_host}'\")" in submit
     assert 'train_resource="select[${train_select}] ${train_resource}"' in submit
     assert '    -x\n)' in submit
+    assert "--within-allocation" in submit
+    assert '[[ -n ${LSB_JOBID:-} ]]' in submit
+    assert '/bin/bash "$run_dir/control/prepare.sh" "$run_dir"' in submit
+    assert '/bin/bash "$run_dir/control/train.sh" "$run_dir"' in submit
 
     assert "ray start --head" in ray_node
     assert "ray start --address" in ray_node

@@ -29,13 +29,17 @@ readonly vllm_actor="nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncG
 
 usage() {
     cat <<'EOF'
-Usage: submit.sh [--dry-run|--submit]
+Usage: submit.sh [--dry-run|--submit|--within-allocation]
 
   --dry-run  Print the resolved preparation and training submissions.
              This is the default and does not create the run directory.
   --submit   Create a unique run directory and reuse a validated preparation
              from the same source commit when available. Otherwise, submit
              preparation followed by a dependent Nano v3 GRPO training job.
+  --within-allocation
+             Create a unique run directory, reuse or run preparation locally,
+             then execute training inside the current LSF allocation. This mode
+             does not call bsub.
 EOF
 }
 
@@ -233,7 +237,7 @@ mode=${1:---dry-run}
     exit 2
 }
 case "$mode" in
-    --dry-run | --submit) ;;
+    --dry-run | --submit | --within-allocation) ;;
     -h | --help)
         usage
         exit 0
@@ -347,6 +351,9 @@ render() {
         -gpu "$gpu_requirement" -x -w "$dependency" -J "$train_job_name" \
         -o "${run_dir}/logs/train.%J.out" -e "${run_dir}/logs/train.%J.err" \
         /bin/bash "$train_payload" "$run_dir"
+    echo "Within-allocation execution:"
+    print_command /bin/bash "$prep_payload" "$run_dir"
+    print_command /bin/bash "$train_payload" "$run_dir"
 }
 
 if [[ $mode == --dry-run ]]; then
@@ -439,6 +446,13 @@ if [[ -n $reused_prep_run ]]; then
     prep_output="Preparation reused from ${reused_prep_run}"
     prep_job_id=reused
     dependency=none
+elif [[ $mode == --within-allocation ]]; then
+    [[ -n ${LSB_JOBID:-} ]] || die "--within-allocation requires LSB_JOBID"
+    [[ -n ${LSB_MCPU_HOSTS:-} ]] || die "--within-allocation requires LSB_MCPU_HOSTS"
+    prep_output="Preparation executed within allocation ${LSB_JOBID}"
+    prep_job_id=${LSB_JOBID}
+    dependency=within-allocation
+    /bin/bash "$run_dir/control/prepare.sh" "$run_dir"
 else
     prep_output=$(bsub \
         -q "$lsf_queue" -G "$lsf_group" -n "$prep_slots" \
@@ -450,6 +464,31 @@ else
     [[ -n $prep_job_id ]] \
         || die "unable to parse preparation job ID from: ${prep_output}"
     dependency="done(${prep_job_id})"
+fi
+
+if [[ $mode == --within-allocation ]]; then
+    [[ -n ${LSB_JOBID:-} ]] || die "--within-allocation requires LSB_JOBID"
+    [[ -n ${LSB_MCPU_HOSTS:-} ]] || die "--within-allocation requires LSB_MCPU_HOSTS"
+    train_job_id=${LSB_JOBID}
+    {
+        printf 'prep_job_id=%s\n' "$prep_job_id"
+        printf 'train_job_id=%s\n' "$train_job_id"
+        printf 'allocation_job_id=%s\n' "$LSB_JOBID"
+        printf 'train_dependency=%s\n' "$dependency"
+        if [[ -n $reused_prep_run ]]; then
+            printf 'prep_reused_from_run=%s\n' "$reused_prep_run"
+        fi
+    } >>"$run_dir/RUN_INFO.txt"
+    echo "$prep_output"
+    echo "Run directory: ${run_dir}"
+    if [[ -n $reused_prep_run ]]; then
+        echo "Preparation: reused from ${reused_prep_run}"
+    else
+        echo "Preparation: completed within allocation ${LSB_JOBID}"
+    fi
+    echo "Training: running within allocation ${LSB_JOBID}"
+    /bin/bash "$run_dir/control/train.sh" "$run_dir"
+    exit 0
 fi
 
 train_submission=(

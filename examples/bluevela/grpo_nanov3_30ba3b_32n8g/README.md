@@ -34,6 +34,16 @@ Review the rendered 32-host request carefully. Submit the run when ready:
 bash examples/bluevela/grpo_nanov3_30ba3b_32n8g/submit.sh --submit
 ```
 
+When SForge already holds a native interactive LSF allocation, reuse those
+nodes without submitting child jobs:
+
+```bash
+bash examples/bluevela/grpo_nanov3_30ba3b_32n8g/submit.sh --within-allocation
+```
+
+This mode requires `LSB_JOBID` and `LSB_MCPU_HOSTS`, runs preparation when no
+validated cache can be reused, and then runs training in the current allocation.
+
 To avoid hosts with a confirmed fabric fault on a retry, pass a validated,
 space-separated exclusion list through `TRAIN_EXCLUDE_HOSTS`. The exclusion is
 applied only to LSF host selection and does not change the training config:
